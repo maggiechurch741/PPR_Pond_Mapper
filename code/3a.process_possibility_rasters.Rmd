@@ -1,0 +1,158 @@
+---
+title: "2a. Process Possibility Rasters"
+output: html_notebook
+date: "2024-09-24"
+author: "maggie church"
+---
+
+```{r}
+library(sf)
+library(dplyr)
+library(terra)
+library(future.apply)
+library(parallel)
+library(tools)
+
+utm14 <- 32614
+w <- detectCores()
+temp_dir <- "../data/intermediate" 
+raw_dir <- ("~/Documents/PPR/raw_data/GreatPlains/raw_data/")  # raw HAPET data folder
+```
+
+**Steps:**
+
+1.  Reproject and self-mask possibility raster tiles. Save output to intermediate data folder.
+
+2.  Break the larger tiles into plot-size rasters. Save all 651 plot-size rasters to intermediate data folder.
+
+**Inputs**:
+
+-   Plot boundaries (note these don't apply to the 2016-2017 data).
+
+-   Possibility layer tiles. I created the Possibility Layer in GEE, [here](https://code.earthengine.google.com/388a0678b7a0ff8d0705dbdaccf47e4c){.uri}. Raster format, epsg:4326 crs.
+
+### 1. reproject and self-mask the larger tiles
+
+I exported the possibility layer from GEE, which split the region into 8 tiles. I should have exported straight to UTM Zone 14N, but instead I just deal with that reprojection here. I also self-mask the rasters here. Save to intermediate data folder. 
+
+This first step takes a few hours :/
+```{r}
+# setup parallel backend (uses all available cores by default)
+plan(multisession, workers=w-2) 
+
+# read in the list of possibility layer files
+files <-  list.files('../data/inputs/gee_rasters/possibilityLayer', full.names = TRUE)
+
+# Parallelize the raster loading, projecting, and masking
+loaded_poss_files <- future_lapply(files, function(file) {
+  
+  # Load and reproject the raster
+  rast_proj <- rast(file) %>% project(utm14_str, res = 10)
+  
+  # Mask out 0s (or FALSE values) in the raster
+  masked_rast <- mask(rast_proj, rast_proj, maskvalue = FALSE)
+  
+  # Write to disc...
+  temp_file <- paste0(temp_dir, "rastMask", file_path_sans_ext(basename(file)), ".tif")
+  writeRaster(masked_rast, temp_file)
+  
+  # but also return here...
+  return(masked_rast)
+})
+
+# Reset the plan to sequential (no parallelization)
+plan(sequential)
+```
+
+### 2. Break (processed) possibility raster tiles into plot-size rasters
+
+Load plot boundaries and apply buffer.
+```{r, message=F, warning=F}
+# read in plot boundary data
+plots1617 <- 
+  st_read("../data/intermediate/plots1617/plots_1617.shp") %>%
+  st_transform(utm14) %>%
+  rename(Plot=plot_id)
+
+plots <- 
+  st_read(dsn = paste0(raw_dir, 'FWS_2018_2019/FSMS_Enterprise_Albers.gdb'), layer='FSMS_PLOTS') %>%
+  st_transform(utm14) %>% 
+  bind_rows(plots1617)
+
+# apply inwards plot buffer 
+plots_inbuff75 <- st_buffer(plots, -7.5)
+```
+
+This next chunk creates the function we'll use to split these Possibility tiles up. If a plot covers multiple tiles, crops from each tile are merged to cover full plot extent.
+```{r}
+# Function to crop raster tiles by plots
+crop_raster <- function(p, rasters) {
+  
+  # Get the extent for the current plot by filtering the plot_id
+  plot_extent <- plots_inbuff75[plots_inbuff75$Plot == p, ]
+  
+  # Initialize a list to store cropped rasters
+  cropped_rasters <- list()
+
+  # Initialize a list to store cropped rasters
+  for (i in seq_along(rasters)) {
+    raster <- rasters[[i]]  # Extract the raster from the list
+
+        # Crop the raster with error handling for non-overlapping extents
+    cropped_raster <- tryCatch({
+        crop(raster, plot_extent)
+      }, error = function(e) {
+        return(NULL)})
+    
+  # If a valid cropped raster was returned, store it in the list
+  if (!is.null(cropped_raster) && !all(is.na(values(cropped_raster)))) {
+    cropped_rasters <- c(cropped_rasters, list(cropped_raster))
+    }
+  }
+  
+  # If there are any cropped rasters, merge them or return the single raster
+  if (length(cropped_rasters) > 0) {
+    if (length(cropped_rasters) == 1) {
+      # If there's only one cropped raster, no need to merge, just return it
+      merged_raster <- cropped_rasters[[1]]
+    } else {
+      # Merge all cropped rasters if more than one
+      merged_raster <- do.call(terra::merge, cropped_rasters)
+    }
+    
+    # Define the output file name based on the plot ID
+    output_file <- paste0(temp_dir, "/cropped_poss_rasters/raster_", p, ".tif")
+    
+    # Save the merged raster
+    writeRaster(merged_raster, output_file, overwrite = TRUE)
+    
+    return(output_file)  # Return the file path of the cropped raster
+  } else {
+    return(NULL)  # Return NULL if no rasters were cropped
+  }
+}
+```
+
+Now run the function! I use parallel processing to speed things up... this part only takes a few minutes. This write the plot-sized possibility rasters to the intermediate data folder. 
+```{r}
+# Get unique plot IDs
+plot_ids <- unique(plots_inbuff75$Plot)
+
+# set up parallel processing
+plan(multisession, workers = w-2)
+
+# Load all raster tiles from step 2
+files_processed <- list.files(paste0(temp_dir, "/possibility_utm14N"), full.names = TRUE)
+rasters <- lapply(files_processed, rast)
+
+# Apply the function to each plot
+result_files <- lapply(plot_ids, function(p) {
+  crop_raster(p, rasters)
+})
+
+# check that output = number of plots
+stopifnot(length(result_files) == length(plot_ids))
+
+# Reset the plan to sequential (no parallelization)
+plan(sequential)
+```

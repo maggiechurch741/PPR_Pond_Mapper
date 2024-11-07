@@ -1,0 +1,676 @@
+```{r}
+library(shiny)
+library(leaflet)
+library(leaflet.extras)
+library(dplyr)
+library(sf)
+library(mapview)
+```
+
+```{r}
+# read in preprocessed and combined HAPET data
+allPonds <- st_read("../data/allPonds/allPond.shp")
+
+needs_plots <- allPonds %>% 
+  filter(dataset %in% c("pair16", "brood16", "pair17", "brood17")) %>% 
+  st_transform(4326)
+```
+
+Open a UI to streamline plot delineation
+```{r, eval=F}
+ui <- fluidPage(
+  leafletOutput("map", height = "1000px"),  # Set the height to 600px
+  verbatimTextOutput("bbox_data")  # Display extracted bounding box coordinates
+)
+
+server <- function(input, output, session) {
+  
+output$map <- renderLeaflet({
+  leaflet() %>%
+    addTiles() %>%
+    addPolygons(data = needs_plots, fillColor = "blue", color = "black", weight = 1, opacity = 0.5) %>%
+    addDrawToolbar(
+      targetGroup = "drawn",
+      rectangleOptions = TRUE,  
+      polygonOptions = TRUE,   
+      markerOptions = FALSE,
+      circleOptions = FALSE,
+      editOptions = editToolbarOptions()
+    ) %>%
+    addLayersControl(
+      overlayGroups = c("drawn"),
+      options = layersControlOptions(collapsed = FALSE)
+    )
+})
+
+# Capture and extract bounding box coordinates when a rectangle is drawn
+  observeEvent(input$map_draw_new_feature, {
+      feature <- input$map_draw_new_feature
+      
+      # Extract the coordinates from the geometry of the drawn rectangle
+      coords <- feature$geometry$coordinates[[1]]
+      
+      # Convert the list of coordinates to a matrix
+      coords_matrix <- do.call(rbind, lapply(coords, unlist))
+      
+      # Extract the bounding box coordinates (min/max lat/lon)
+      lng_min <- min(coords_matrix[, 1])  # Min longitude (x)
+      lng_max <- max(coords_matrix[, 1])  # Max longitude (x)
+      lat_min <- min(coords_matrix[, 2])  # Min latitude (y)
+      lat_max <- max(coords_matrix[, 2])  # Max latitude (y)
+      
+      # Display the bounding box coordinates
+      #bbox_coords <- sprintf("Bounding Box:\nLng min: %f, Lng max: %f\nLat min: %f, Lat max: %f", 
+      #                       lng_min, lng_max, lat_min, lat_max)
+      
+     bbox_coords <- sprintf("%f, %f,  %f, %f,  %f, %f,  %f, %f,  %f, %f", 
+                            lng_min, lat_min, lng_min, lat_max, 
+                            lng_max, lat_max, lng_max, lat_min, 
+                            lng_min, lat_min)
+      
+      output$bbox_data <- renderText({
+        bbox_coords
+      })
+  })
+}
+
+shinyApp(ui, server)
+```
+
+Add plot coordinates from the UI here
+```{r}
+# plot
+p1 <- list(matrix(c(
+-101.593838, 47.876980,  -101.593838, 47.906044,  -101.550922, 47.906044,  -101.550922, 47.876980,  -101.593838, 47.876980
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p2 <- list(matrix(c(
+-101.572380, 47.964008,  -101.572380, 47.992794,  -101.529293, 47.992794,  -101.529293, 47.964008,  -101.572380, 47.964008
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p3 <- list(matrix(c(
+-101.679153, 47.978317,  -101.679153, 48.007094,  -101.636066, 48.007094,  -101.636066, 47.978317,  -101.679153, 47.978317
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p4 <- list(matrix(c(
+-101.641817, 48.052038,  -101.641817, 48.081061,  -101.598558, 48.081061,  -101.598558, 48.052038,  -101.641817, 48.052038
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p5 <- list(matrix(c(
+-101.706791, 48.052267,  -101.706791, 48.080831,  -101.663189, 48.080831,  -101.663189, 48.052267,  -101.706791, 48.052267
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p6 <- list(matrix(c(
+-101.749535, 48.052267,  -101.749535, 48.081290,  -101.706619, 48.081290,  -101.706619, 48.052267,  -101.749535, 48.052267
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p7 <- list(matrix(c(
+-101.857080, 48.023285,  -101.857080, 48.052038,  -101.814466, 48.052038,  -101.814466, 48.023285,  -101.857080, 48.023285
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p8 <- list(matrix(c(
+-101.728420, 48.182856,  -101.728420, 48.210947,  -101.685290, 48.210947,  -101.685290, 48.182856,  -101.728420, 48.182856
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p9 <- list(matrix(c(
+-101.900768, 48.254627,  -101.900768, 48.283650,  -101.858196, 48.283650,  -101.858196, 48.254627,  -101.900768, 48.254627
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p10 <- list(matrix(c(
+-102.105818, 48.356306,  -102.105818, 48.386867,  -102.062645, 48.386867,  -102.062645, 48.356306,  -102.105818, 48.356306
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p11 <- list(matrix(c(
+-102.202721, 48.312827,  -102.202721, 48.341475,  -102.160406, 48.341475,  -102.160406, 48.312827,  -102.202721, 48.312827
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p12 <- list(matrix(c(
+-102.245722, 48.341817,  -102.245722, 48.372444,  -102.202721, 48.372444,  -102.202721, 48.341817,  -102.245722, 48.341817
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p13 <- list(matrix(c(
+-102.309408, 48.270169,  -102.309408, 48.296328,  -102.268124, 48.296328,  -102.268124, 48.270169,  -102.309408, 48.270169
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p14 <- list(matrix(c(
+-102.289581, 48.341760,  -102.289581, 48.372615,  -102.246237, 48.372615,  -102.246237, 48.341760,  -102.289581, 48.341760
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p15 <- list(matrix(c(
+-102.267694, 48.226102,  -102.267694, 48.254513,  -102.224607, 48.254513,  -102.224607, 48.226102,  -102.267694, 48.226102
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p16 <- list(matrix(c(
+-102.138262, 48.124622,  -102.138262, 48.153375,  -102.095089, 48.153375,  -102.095089, 48.124622,  -102.138262, 48.124622
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p17 <- list(matrix(c(
+-102.267609, 48.139631,  -102.267609, 48.167574,  -102.224607, 48.167574,  -102.224607, 48.139631,  -102.267609, 48.139631
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p18 <- list(matrix(c(
+-102.353010, 48.110297,  -102.353010, 48.139001,  -102.310009, 48.139001,  -102.310009, 48.110297,  -102.353010, 48.110297
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p19 <- list(matrix(c(
+-102.439699, 48.067182,  -102.439699, 48.095624,  -102.396955, 48.095624,  -102.396955, 48.067182,  -102.439699, 48.067182
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p20 <- list(matrix(c(
+-102.547159, 48.226102,  -102.547159, 48.254741,  -102.504673, 48.254741,  -102.504673, 48.226102,  -102.547159, 48.226102
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p21 <- list(matrix(c(
+-102.698650, 48.211977,  -102.698650, 48.240509,  -102.656593, 48.240509,  -102.656593, 48.211977,  -102.698650, 48.211977
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p22 <- list(matrix(c(
+-102.698650, 48.153890,  -102.698650, 48.182455,  -102.656078, 48.182455,  -102.656078, 48.153890,  -102.698650, 48.153890
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p23 <- list(matrix(c(
+-102.212505, 48.488510,  -102.212505, 48.517571,  -102.168989, 48.517571,  -102.168989, 48.488510,  -102.212505, 48.488510
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p24 <- list(matrix(c(
+-102.255850, 48.444917,  -102.255850, 48.473832,  -102.212591, 48.473832,  -102.212591, 48.444917,  -102.255850, 48.444917
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p25 <- list(matrix(c(
+-102.342367, 48.474116,  -102.342367, 48.503412,  -102.299538, 48.503412,  -102.299538, 48.474116,  -102.342367, 48.474116
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p26 <- list(matrix(c(
+-102.386312, 48.459718,  -102.386312, 48.488681,  -102.342539, 48.488681,  -102.342539, 48.459718,  -102.386312, 48.459718
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p27 <- list(matrix(c(
+-102.408028, 48.502673,  -102.408028, 48.532066,  -102.364769, 48.532066,  -102.364769, 48.502673,  -102.408028, 48.502673
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p28 <- list(matrix(c(
+-102.364254, 48.517514,  -102.364254, 48.546217,  -102.321339, 48.546217,  -102.321339, 48.517514,  -102.364254, 48.517514
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p29 <- list(matrix(c(
+-102.321253, 48.517457,  -102.321253, 48.546331,  -102.278080, 48.546331,  -102.278080, 48.517457,  -102.321253, 48.517457
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p30 <- list(matrix(c(
+-102.342968, 48.560875,  -102.342968, 48.590121,  -102.299795, 48.590121,  -102.299795, 48.560875,  -102.342968, 48.560875
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p31 <- list(matrix(c(
+-102.299881, 48.575358,  -102.299881, 48.602325,  -102.255850, 48.602325,  -102.255850, 48.575358,  -102.299881, 48.575358
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p32 <- list(matrix(c(
+-102.386055, 48.589837,  -102.386055, 48.618612,  -102.343140, 48.618612,  -102.343140, 48.589837,  -102.386055, 48.589837
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p33 <- list(matrix(c(
+-102.429657, 48.590007,  -102.429657, 48.618612,  -102.386312, 48.618612,  -102.386312, 48.590007,  -102.429657, 48.590007
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p34 <- list(matrix(c(
+-102.429743, 48.560988,  -102.429743, 48.589780,  -102.386312, 48.589780,  -102.386312, 48.560988,  -102.429743, 48.560988
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p35 <- list(matrix(c(
+-102.407513, 48.633533,  -102.407513, 48.662170,  -102.364426, 48.662170,  -102.364426, 48.633533,  -102.407513, 48.633533
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p36 <- list(matrix(c(
+-102.515659, 48.618953,  -102.515659, 48.647995,  -102.473516, 48.647995,  -102.473516, 48.618953,  -102.515659, 48.618953
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p37 <- list(matrix(c(
+-102.581663, 48.619066,  -102.581663, 48.647938,  -102.538061, 48.647938,  -102.538061, 48.619066,  -102.581663, 48.619066
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p38 <- list(matrix(c(
+-102.537718, 48.662283,  -102.537718, 48.691357,  -102.494631, 48.691357,  -102.494631, 48.662283,  -102.537718, 48.662283
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p39 <- list(matrix(c(
+-102.646894, 48.619066,  -102.646894, 48.647825,  -102.603979, 48.647825,  -102.603979, 48.619066,  -102.646894, 48.619066
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p40 <- list(matrix(c(
+-102.712469, 48.619009,  -102.712469, 48.647655,  -102.668953, 48.647655,  -102.668953, 48.619009,  -102.712469, 48.619009
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p41 <- list(matrix(c(
+-102.712297, 48.662396,  -102.712297, 48.691187,  -102.668695, 48.691187,  -102.668695, 48.662396,  -102.712297, 48.662396
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p42 <- list(matrix(c(
+-102.721395, 48.735021,  -102.721395, 48.764223,  -102.677450, 48.764223,  -102.677450, 48.735021,  -102.721395, 48.735021
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p43 <- list(matrix(c(
+-102.742510, 48.764110,  -102.742510, 48.792277,  -102.700024, 48.792277,  -102.700024, 48.764110,  -102.742510, 48.764110
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p44 <- list(matrix(c(
+-102.787142, 48.749624,  -102.787142, 48.778365,  -102.742767, 48.778365,  -102.742767, 48.749624,  -102.787142, 48.749624
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p45 <- list(matrix(c(
+-102.851086, 48.720244,  -102.851086, 48.749228,  -102.809029, 48.749228,  -102.809029, 48.720244,  -102.851086, 48.720244
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p46 <- list(matrix(c(
+-102.895546, 48.705859,  -102.895546, 48.734795,  -102.852716, 48.734795,  -102.852716, 48.705859,  -102.895546, 48.705859
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p47 <- list(matrix(c(
+-102.939663, 48.749455,  -102.939663, 48.778478,  -102.896147, 48.778478,  -102.896147, 48.749455,  -102.939663, 48.749455
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p48 <- list(matrix(c(
+-102.821217, 48.633306,  -102.821217, 48.662283,  -102.777357, 48.662283,  -102.777357, 48.633306,  -102.821217, 48.633306
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p49 <- list(matrix(c(
+-102.754354, 48.590007,  -102.754354, 48.618612,  -102.713156, 48.618612,  -102.713156, 48.590007,  -102.754354, 48.590007
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p50 <- list(matrix(c(
+-102.951164, 48.633759,  -102.951164, 48.662170,  -102.907562, 48.662170,  -102.907562, 48.633759,  -102.951164, 48.633759
+    ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p51 <- list(matrix(c(
+-103.080940, 48.589950,  -103.080940, 48.619009,  -103.037767, 48.619009,  -103.037767, 48.589950,  -103.080940, 48.589950
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p52 <- list(matrix(c(
+-102.993221, 48.474458,  -102.993221, 48.498465,  -102.953653, 48.498465,  -102.953653, 48.474458,  -102.993221, 48.474458
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p53 <- list(matrix(c(
+-102.515831, 48.503128,  -102.515831, 48.531669,  -102.473688, 48.531669,  -102.473688, 48.503128,  -102.515831, 48.503128
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p54 <- list(matrix(c(
+-102.537117, 48.401172,  -102.537117, 48.430738,  -102.496090, 48.430738,  -102.496090, 48.401172,  -102.537117, 48.401172
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p55 <- list(matrix(c(
+-102.647238, 48.356363,  -102.647238, 48.386354,  -102.601833, 48.386354,  -102.601833, 48.356363,  -102.647238, 48.356363
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p56 <- list(matrix(c(
+-102.720966, 48.314825,  -102.720966, 48.341931,  -102.677622, 48.341931,  -102.677622, 48.314825,  -102.720966, 48.314825
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p57 <- list(matrix(c(
+-102.711697, 48.387152,  -102.711697, 48.416100,  -102.669468, 48.416100,  -102.669468, 48.387152,  -102.711697, 48.387152
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p58 <- list(matrix(c(
+-103.059654, 48.372900,  -103.059654, 48.401172,  -103.020859, 48.401172,  -103.020859, 48.372900,  -103.059654, 48.372900
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326)
+
+# plot
+p59 <- list(matrix(c(
+-103.167114, 48.416556,  -103.167114, 48.442298,  -103.125229, 48.442298,  -103.125229, 48.416556,  -103.167114, 48.416556
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p60 <- list(matrix(c(
+-103.166943, 48.676907,  -103.166943, 48.705576,  -103.124714, 48.705576,  -103.124714, 48.676907,  -103.166943, 48.676907
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p61 <- list(matrix(c(
+-103.211060, 48.662623,  -103.211060, 48.691074,  -103.167973, 48.691074,  -103.167973, 48.662623,  -103.211060, 48.662623
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p62 <- list(matrix(c(
+-103.254662, 48.662510,  -103.254662, 48.691074,  -103.212261, 48.691074,  -103.212261, 48.662510,  -103.254662, 48.662510
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p63 <- list(matrix(c(
+-103.245907, 48.706256,  -103.245907, 48.734795,  -103.201447, 48.734795,  -103.201447, 48.706256,  -103.245907, 48.706256
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p64 <- list(matrix(c(
+-103.180161, 48.735814,  -103.180161, 48.763997,  -103.136902, 48.763997,  -103.136902, 48.735814,  -103.180161, 48.735814
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p65 <- list(matrix(c(
+-103.246250, 48.749738,  -103.246250, 48.778478,  -103.202133, 48.778478,  -103.202133, 48.749738,  -103.246250, 48.749738
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p66 <- list(matrix(c(
+-103.136559, 48.793182,  -103.136559, 48.821446,  -103.092957, 48.821446,  -103.092957, 48.793182,  -103.136559, 48.793182
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p67 <- list(matrix(c(
+-103.319550, 48.663190,  -103.319550, 48.691074,  -103.276463, 48.691074,  -103.276463, 48.663190,  -103.319550, 48.663190
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p68 <- list(matrix(c(
+-103.552494, 48.851388,  -103.552494, 48.879845,  -103.509407, 48.879845,  -103.509407, 48.851388,  -103.552494, 48.851388
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p69 <- list(matrix(c(
+-103.661327, 48.880522,  -103.661327, 48.908624,  -103.619614, 48.908624,  -103.619614, 48.880522,  -103.661327, 48.880522
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p70 <- list(matrix(c(
+-103.760462, 48.938344,  -103.760462, 48.962920,  -103.728104, 48.962920,  -103.728104, 48.938344,  -103.760462, 48.938344
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p71 <- list(matrix(c(
+-103.793764, 48.967372,  -103.793764, 48.996044,  -103.750162, 48.996044,  -103.750162, 48.967372,  -103.793764, 48.967372
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p72 <- list(matrix(c(
+-103.837452, 48.923909,  -103.837452, 48.952663,  -103.795996, 48.952663,  -103.795996, 48.923909,  -103.837452, 48.923909
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p73 <- list(matrix(c(
+-103.946800, 48.938570,  -103.946800, 48.966864,  -103.903799, 48.966864,  -103.903799, 48.938570,  -103.946800, 48.938570
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p74 <- list(matrix(c(
+-103.705444, 48.733323,  -103.705444, 48.763884,  -103.662872, 48.763884,  -103.662872, 48.733323,  -103.705444, 48.733323
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p75 <- list(matrix(c(
+-103.814621, 48.792616,  -103.814621, 48.821333,  -103.772049, 48.821333,  -103.772049, 48.792616,  -103.814621, 48.792616
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p76 <- list(matrix(c(
+-103.880711, 48.822350,  -103.880711, 48.851444,  -103.837280, 48.851444,  -103.837280, 48.822350,  -103.880711, 48.822350
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+
+# plot
+p77 <- list(matrix(c(
+-104.266090, 48.896719,  -104.266090, 48.924078,  -104.220943, 48.924078,  -104.220943, 48.896719,  -104.266090, 48.896719
+      ), ncol = 2, byrow = TRUE)) %>% 
+  st_polygon() %>%
+  st_sfc(crs = 4326) 
+```
+
+Combine, and add plotid
+```{r}
+# Store all polygons in a list
+polygons_list <- list(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, p39, p40, p41, p42, p43, p44, p45, p46, p47, p48, p49, p50, p51, p52, p53, p54, p55, p56, p57, p58, p59, p60, p61, p62, p63, p64, p65, p66, p67, p68, p69, p70, p71, p72, p73, p74, p75, p76, p77)
+
+# get max plot id from HAPET
+max_hapet_plotid <- allPonds %>% st_drop_geometry() %>% summarize(max(Plot, na.rm=T)) %>% pull()
+
+# create new plot ids, atop the max id from HAPET 
+plot_ids <- 1:length(polygons_list) + max_hapet_plotid
+
+# Extract the actual polygon geometries from each sfc object
+plots <- lapply(polygons_list, function(p) p[[1]]) %>%
+  st_sfc(crs = 4326) %>% 
+  st_sf(Plot = plot_ids,
+        geometry = .) 
+```
+
+Write over allPonds, filling in the new pond ids. Some small ponds near plot boundaries didn't get assigned a plot, but that's ok. 
+```{r}
+# add plot id to 2016-2017 datasets
+join <- st_join(needs_plots, plots) %>%
+  rename(Plot=Plot.y) %>%
+  select(-Plot.x) 
+
+# some ponds span multiple plots - split these ponds by plot boundary
+dup <- join %>% 
+  group_by(rownum) %>%
+  filter(n()>1) %>% 
+  st_intersection(plots) %>% 
+  mutate(Plot=Plot.1) %>% 
+  select(-Plot.1)  %>% 
+  distinct()
+
+# add dups back to pond list. And reproject to UTM14N
+ponds_1617 <- join %>% 
+  group_by(rownum) %>%
+  filter(n()==1) %>%
+  bind_rows(dup) %>% 
+  st_transform(32614)
+
+# add all ponds + their new plot ids back to "allPonds"  
+allPonds_new <- allPonds %>% 
+  filter(!dataset %in% c("pair16", "brood16", "pair17", "brood17")) %>%
+  bind_rows(ponds_1617)
+
+# save over allPonds
+st_write(allPonds_new, "../data/allPonds/allPond_fixed.shp", append=FALSE)
+```
+
+Write plot boundaries to file
+```{r}
+st_write(plots, "../data/intermediate/plots1617/plots_1617.shp", append=FALSE)
+```
+

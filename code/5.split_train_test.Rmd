@@ -1,0 +1,234 @@
+---
+title: "sample_gtwpred_data"
+output: pdf_document
+date: "2024-08-16"
+---
+
+```{r}
+library(dplyr)
+library(readr)
+library(sf)
+
+set.seed(123)
+```
+
+
+Wet points were sampled from raw HAPET data in PPR/raw/GreatPlains/wrangle_raw_maggie/samplePoints.Rmd
+From there, the wet points are uploaded to GEE to extract predictor values.
+Dry points are also sampled in GEE.
+Wet and dry points with predictor values are saved in PPR/samplePoints/data/inputs
+
+This script samples from all points, returning a subset of data for training and testing
+
+# read in dry GT points
+```{r}
+dry16_17 <- st_read('../data/inputs/dry_wpred/dry1617/dry1617.shp')
+
+dry19 <- st_read('../data/inputs/dry_wpred/dry19/compDry19.shp')
+
+dry20 <- st_read('../data/inputs/dry_wpred/dry20/compDry20.shp')
+
+dry21 <- st_read('../data/inputs/dry_wpred/dry21/compDry21.shp')
+
+dry22 <- st_read('../data/inputs/dry_wpred/dry22/compDry22.shp') 
+
+allDry <- bind_rows(dry16_17, dry19, dry20, dry21, dry22) %>% 
+  filter(red_edge_3 != -9999 ) %>% # drop obs without optical data
+  mutate(type = 'dry') %>%
+  dplyr::select(-b1) %>% 
+  mutate(flyvr_d = as.Date(as.POSIXct(flyvr_d / 1000, origin = "1970-01-01", tz = "UTC")))
+```
+
+# read in wet GT points
+I should probably drop obs without optical data earlier, before sampling
+```{r}
+wet16_17 <- st_read('../data/inputs/wet_wpred/wet_1617/wet2.shp') 
+
+wet19 <- st_read('../data/inputs/wet_wpred/wet19/compWet19.shp') 
+
+wet20 <- st_read('../data/inputs/wet_wpred/wet20/compWet20.shp')
+
+wet21 <- st_read('../data/inputs/wet_wpred/wet21/compWet21.shp')
+
+wet22 <- st_read('../data/inputs/wet_wpred/wet22/compWet22.shp') 
+
+allWet <- bind_rows(wet16_17, wet19, wet20, wet21, wet22) %>%
+  mutate(type = 'wet') %>%
+  filter(red_edge_3 != -9999) %>% # drop obs without optical data 
+  dplyr::select(-b1) %>%
+  mutate(flyvr_d = as.Date(as.POSIXct(flyvr_d / 1000, origin = "1970-01-01", tz = "UTC")))
+```
+
+Looks like we found valid pixels for >99% of points in all years (96-99% in 2017)
+CHECK THIS
+```{r}
+# put all the training data together
+all_samples <- bind_rows(allWet, allDry) 
+
+all_samples %>% 
+  st_drop_geometry() %>%
+  group_by(type, dataset, STUSPS, sz_clss) %>% 
+  summarize(n()) %>%
+  arrange(STUSPS, type, sz_clss, dataset) %>%
+  write_csv("../data/inputs/data_summary.csv")
+
+# add more VIs
+moreVIs <- function(df){ 
+  df %>% 
+    mutate(
+      NDPI = (swir1-green)/(swir1+green),
+      BU3 = red + swir1 - nir,
+      AWEI = (green-swir2) - (0.25*nir + 2.75*swir1),
+      AWEISH = blue + 2.5*green - 1.5*(nir+swir1) - 0.25*swir2,
+      BSI = ((swir1+red-nir-blue)/(swir1+red+nir+blue))*100 + 100,
+      DVW = NDVI-NDWI,
+      DVI = nir-red,
+      IFW = nir-green,
+      IPVI = nir/(nir+red),
+      MIFW = swir1-green,
+      OSAVI = (nir-red)/(nir+red+0.16),
+      SAVI = ((nir-red)/(nir+red+0.5))*1.5,
+      RVI = nir/red,
+      TVI = 0.5*(120*(nir-green)-200*(red-green)),
+      WRI = (green+red)/(nir+swir1),
+      WTI = 0.91*red + 0.43*nir,
+      VARI = (green-red)/(green+red-blue),
+      BGR = blue/green,
+      GRR = green/red,
+      RBR = red/blue,
+      SRBI = blue-red,
+      NPCRI = (red-blue)/(red+blue), # Normalized Pigment Chlorophyll Ratio Index 
+      EVI3b = 2.5 * (nir - red)/(nir + (6*red) - (7.5*blue) + 1),
+      EVI2b = 2.5 * (nir - red)/ (nir + (2.4*red) + 1)
+    )
+}
+
+all_samples <- moreVIs(all_samples)
+
+all_samples %>%
+  st_write("../data/inputs/all_samples/all_samples.shp", append=F)
+```
+
+get test regions
+```{r}
+all_samples <- st_read("../data/inputs/all_samples/all_samples.shp") %>%
+  filter(!is.na(dataset))
+
+# load ecoregion boundaries
+ecoregion5 <- st_read("../../ecoregions/reg5_eco_l3.shp") %>% st_transform(4326)
+ecoregion7 <- st_read("../../ecoregions/reg7_eco_l3.shp") %>% st_transform(4326)
+ecoregion8 <- st_read("../../ecoregions/reg8_eco_l3.shp") %>% st_transform(4326)
+
+# combine ecoregion layers
+ecoregions <- bind_rows(ecoregion5, ecoregion7, ecoregion8) %>% 
+  select(NA_L3NAME, NA_L2NAME)
+
+# load ppr boundary
+ppr <- st_read("../../ppr_boundary/PPJV/PPJV.shp") %>% st_transform(4326)
+
+# get the ecoregions within the ppr
+ppr_ecoregions <- st_intersection(ecoregions, ppr)
+
+# modify ecoregion category, to consolidate
+ppr_ecoregions2 <- ppr_ecoregions %>% 
+  mutate(L3mod = case_when(
+    NA_L3NAME %in% c("Northwestern Great Plains", "Middle Rockies", "Canadian Rockies", "Northwestern Glaciated Plains") ~ "Northwestern Plains",
+    NA_L3NAME %in% c("North Central Hardwood Forests", "Northern Lakes and Forests") ~ "Northern Forests",
+    NA_L3NAME %in% c("Lake Manitoba and Lake Agassiz Plain", "Northern Minnesota Wetlands") ~ "Lake Agassiz Plain",
+    NA_L3NAME %in% c("Western Corn Belt Plains", "Driftless Area") ~ "Western Corn Belt Plains",
+    T ~ NA_L3NAME
+  ))
+
+# add modified ecoregion to points
+all_samples <- st_join(all_samples, ppr_ecoregions2)
+
+# table of wet points by modified ecoregions
+all_samples %>% st_drop_geometry() %>% filter(type=="wet") %>% 
+  group_by(NA_L3NAME, dataset) %>% summarize(n()) %>% gt::gt()
+
+```
+
+# Split training/testing
+I'll test on test on 2016 (wet) and 2021 (dry)
+
+Here, explore gridded data by ecoregion to select test regions
+```{r}
+set.seed(123)
+
+testyrs <- c("pair16", "brood16", "2021")
+
+all_samples_wet_trainyears <- all_samples %>% 
+  filter(type=="wet" & !(dataset %in% testyrs))
+
+# add a grid
+grid <- st_make_grid(ppr, n=25) 
+index <- which(lengths(st_intersects(grid, ppr_ecoregions2)) > 0)
+grid_ppr <- grid[index]
+
+# convert the grid to sf
+grid_sf <- grid_ppr %>%  
+  st_as_sf() %>%
+  mutate(grid_id = row_number()) 
+
+# actually let's save this, for CV partitioning later
+# st_write(grid_sf, '../data/inputs/grid/grid_sf.shp', append=F)
+```
+
+
+Select test "boxes
+
+I could do st_make_grid(n=50) above, then even test sets would have 150-180 GT points.
+Test grid_ids for those are c(247, 118, 38, 174, 255)
+```{r}
+library(ggplot2)
+library(mapview)
+
+
+# find contenders for testing boxes
+contenders <- grid_sf %>%
+  st_join(all_samples_wet_trainyears, join = st_intersects) %>%
+  group_by(grid_id) %>% 
+  # the box falls into exactly 1 ecoregion
+  filter(n_distinct(L3mod) == 1) %>%    
+  # the box has samples from every dataset (ND will have more, from 2017) OR the box is in MT
+  filter(case_when(
+    L3mod == c("Northwestern Plains") ~ n_distinct(dataset) == 5,
+    TRUE ~ n_distinct(dataset) == 3
+  ) | STUSPS == "MT") %>% 
+  ungroup() %>%
+  group_by(grid_id, L3mod, dataset) %>% 
+  summarize(n=n())                    
+
+# I check these out in mapview and chose test boxes
+# (I actually chose a site in MT that doesn't have data from 2020)
+test_grid_ids <- c(120, 260, 201, 170, 209, 37)
+
+mapview(grid_sf %>% filter(grid_id %in% test_grid_ids), col.regions="navy", legend=F) +
+  mapview(ppr_ecoregions2, zcol="L3mod")
+
+# limit to selected test boxes
+test_boxes <- grid_sf %>%
+  filter(grid_id %in% test_grid_ids)
+```
+
+There might have been an issue with export of some fields: Shape_Area, flyvr_d, Acres...
+```{r}
+# get test from novel areas and years
+testing <- all_samples %>% 
+  filter(dataset %in% testyrs) %>%
+  bind_rows(st_filter(all_samples, test_boxes)) %>%
+  distinct() %>% 
+  st_join(grid_sf, join = st_intersects) # add grid_id
+ 
+# get train data
+training <- all_samples %>% 
+  filter(!(dataset %in% testyrs)) %>%
+  st_difference(st_union(test_boxes)) %>% 
+  st_join(grid_sf, join = st_intersects) # add grid_id
+```
+
+# Export training/testing data
+```{r}
+st_write(training, '../data/intermediate/unbalanced_training/training.shp', append=F)
+st_write(testing, '../data/intermediate/testing/testing.shp', append=F)
+```

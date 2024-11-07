@@ -1,0 +1,451 @@
+---
+title: "figures_exploratory"
+output: pdf_document
+date: "2024-08-16"
+---
+
+This script simply explores the predictors of training and testing data. Each chunk creates a different figure.
+
+```{r}
+library(dplyr)
+library(readr)
+library(tidyr)
+library(sf)
+library(ggplot2)
+library(mapview)
+library(shapr)
+library(ggfortify)
+library(gridExtra)
+library(corrplot)
+
+set.seed(123)
+```
+
+
+# Load training/testing data
+```{r}
+# get state boundaries
+states <- st_read('./../../states/cb_2016_us_state_5m.shp') %>%
+  st_transform(4326) %>% 
+  dplyr::select(STATEFP, STUSPS)
+
+# get PPR boundary, for figures
+ppr <- st_read("./../../ppr_boundary/PPJV/PPJV.shp") %>% st_transform(4326)
+
+# training is 2017 and 2019 data (minus SD) (450 per state/year)
+training <- st_read('../data/intermediate/balanced_training/balanced_training.shp') %>%
+  mutate(type2 = case_when(
+    area_cr < 2 ~ 'small (< 2 acre)',
+    area_cr >= 2 ~ 'large (>= 2 acre)',
+    type == 'dry' ~ 'dry'
+  )) 
+
+# testing is 2016 data and 2019 SD (450 per state/year)
+testing <- st_read('./../data/intermediate/testing/testing.shp') %>%
+  mutate(type2 = case_when(
+    area_cr < 2 ~ 'small (< 2 acre)',
+    area_cr >= 2 ~ 'large (>= 2 acre)',
+    type == 'dry' ~ 'dry'
+  )) 
+
+featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI","spei30d_2","red","spei30d_1","nir","water30_10","VVVH_ratio","water90_10","green","z_2","NDWI","z_1","ABWI","hand90_100","VH","TCB","NDMI1","blue","hand30_100","mNDWI2","mNDWI1","TCG","red_edge_1","z","red_edge_2","red_edge_3","NDPI","BU3","AWEI","AWEISH","BSI","DVW","DVI","IFW","IPVI","MIFW","OSAVI","SAVI","RVI","TVI","WRI","WTI")  
+```
+
+
+# Spectral Signature
+```{r}
+
+######### plot spectral signature ######### 
+# compare SS of small pond vs large pond vs dry points - for training data
+
+class_means <- training %>%
+  #filter(type2 != 'small (< 2 acre)') %>%
+  as.data.frame() %>%
+  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type2) %>%
+  group_by(type2) %>%
+  summarize(across(everything(), mean))
+
+class_sd <- training %>%
+ # filter(type2 != 'small (< 2 acre)') %>%
+  as.data.frame() %>%
+  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type2) %>%
+  group_by(type2) %>%
+  summarise(across(everything(), sd)) 
+  #summarise(across(everything(), std.error))
+
+class_means_bands <-
+  class_means %>%
+  pivot_longer(cols=blue:swir2, names_to="band") %>%
+  rename("mean"="value")
+
+class_sd_bands <-
+  class_sd %>%
+  pivot_longer(cols=blue:swir2, names_to="band") %>%
+  rename("sd"="value")
+
+class_bands <- inner_join(class_sd_bands, class_means_bands, by = c("type2", "band")) %>% #, sz_clss) %>%
+  mutate(band_acr = case_when(
+    band=="blue"~"B",
+    band=="green"~"G",
+    band=="red"~"R",
+    band=="red_edge_1"~"RE1",
+    band=="red_edge_2"~"RE2",
+    band=="red_edge_3"~"RE3",
+    band=="nir"~"NIR",
+    band=="swir1"~"SWIR1",
+    band=="swir2"~"SWIR2"
+  )) %>%
+  mutate(band_cw = case_when( # cw = central wavelength
+    band=="blue"~ .49,
+    band=="green"~ .56,
+    band=="red"~ .665,
+    band=="red_edge_1"~ .705,
+    band=="red_edge_2"~ .74,
+    band=="red_edge_3"~ .783,
+    band=="nir"~ .842,
+    band=="swir1"~ 1.61,
+    band=="swir2"~ 2.19
+  ))
+
+subtitle <- "  Dotted lines show average surface reflectance.
+Error bar shows stardard deviation for each landcover type (+/- 1 sd).
+Training data only."
+
+# Define S2 wavelength ranges and corresponding colors
+color_bars <- data.frame(
+  xmin = c(.457, .542, .650, .6975, .7325, .773, .7845, 1.565, 2.100),  # Starting wavelengths
+  xmax = c(.522, .577, .680, .7125, .7475, .793, .8995, 1.655, 2.280),  # Ending wavelengths
+  color = c("blue", "forestgreen", "red", "brown3", "brown3", "brown3", "tan4", "grey50", "grey30")  # Corresponding colors
+)
+
+# plot
+class_bands %>% 
+  #filter(type2 != 'small (< 2 acre)') %>%
+  #filter(type2 != 'large (>= 2 acre)') %>%
+  ggplot(aes(x = band_cw,
+             y = mean,
+             group = type2, 
+             color = factor(type2, levels = c("dry", "small (< 2 acre)", "large (>= 2 acre)"))
+             )) +
+  geom_line(linetype='dashed' ) + #, size=2) +    
+  geom_ribbon(aes(ymin = mean - sd, 
+                  ymax = mean + sd,
+                  fill = factor(type2, levels = c("dry", "small (< 2 acre)", "large (>= 2 acre)"))
+                  ), 
+              alpha = 0.15, linetype = 0) +
+  theme_minimal() + 
+  labs(x=expression(paste('Wavelength (', mu, 'm)')), y='Reflectance') +
+  labs(subtitle = subtitle) + 
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=20),
+        legend.text=element_text(size=20),
+        legend.title=element_blank()) +
+  geom_rect(data = color_bars, 
+            aes(xmin = xmin, xmax = xmax, ymin = -0.015, ymax = 0), 
+            inherit.aes = FALSE, 
+            fill = color_bars$color) #+
+  #scale_color_manual(values = c("dry" = "red", "small (< 2 acre)" = "forestgreen", "large (>= 2 acre)" = "blue")) +
+  #scale_fill_manual(values = c("dry" = "red", "small (< 2 acre)" = "forestgreen", "large (>= 2 acre)" = "blue")) 
+  
+```
+```{r}
+# same as above but just wet vs dry
+class_means <- training %>%
+  as.data.frame() %>%
+  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type) %>%
+  group_by(type) %>%
+  summarize(across(everything(), mean))
+
+class_sd <- training %>%
+  as.data.frame() %>%
+  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type) %>%
+  group_by(type) %>%
+  summarise(across(everything(), sd)) 
+
+class_means_bands <-
+  class_means %>%
+  pivot_longer(cols=blue:swir2, names_to="band") %>%
+  rename("mean"="value")
+
+class_sd_bands <-
+  class_sd %>%
+  pivot_longer(cols=blue:swir2, names_to="band") %>%
+  rename("sd"="value")
+
+class_bands <- inner_join(class_sd_bands, class_means_bands, by = c("type", "band")) %>% #, sz_clss) %>%
+  mutate(band_acr = case_when(
+    band=="blue"~"B",
+    band=="green"~"G",
+    band=="red"~"R",
+    band=="red_edge_1"~"RE1",
+    band=="red_edge_2"~"RE2",
+    band=="red_edge_3"~"RE3",
+    band=="nir"~"NIR",
+    band=="swir1"~"SWIR1",
+    band=="swir2"~"SWIR2"
+  )) %>%
+  mutate(band_cw = case_when( # cw = central wavelength
+    band=="blue"~ .49,
+    band=="green"~ .56,
+    band=="red"~ .665,
+    band=="red_edge_1"~ .705,
+    band=="red_edge_2"~ .74,
+    band=="red_edge_3"~ .783,
+    band=="nir"~ .842,
+    band=="swir1"~ 1.61,
+    band=="swir2"~ 2.19
+  ))
+
+subtitle <- "  Dotted lines show average surface reflectance.
+Error bar shows stardard deviation for each landcover type (+/- 1 sd).
+Training data only."
+
+# Define S2 wavelength ranges and corresponding colors
+color_bars <- data.frame(
+  xmin = c(.457, .542, .650, .6975, .7325, .773, .7845, 1.565, 2.100),  # Starting wavelengths
+  xmax = c(.522, .577, .680, .7125, .7475, .793, .8995, 1.655, 2.280),  # Ending wavelengths
+  color = c("blue", "forestgreen", "red", "brown3", "brown3", "brown3", "tan4", "grey50", "grey30")  # Corresponding colors
+)
+
+# plot
+class_bands %>% 
+  #filter(type2 != 'small (< 2 acre)') %>%
+  #filter(type2 != 'large (>= 2 acre)') %>%
+  ggplot(aes(x = band_cw,
+             y = mean,
+             group = type, 
+             color = factor(type, levels = c("dry", "wet"))
+             )) +
+  geom_line(linetype='dashed' ) + #, size=2) +    
+  geom_ribbon(aes(ymin = mean - sd, 
+                  ymax = mean + sd,
+                  fill = factor(type, levels = c("dry", "wet"))
+                  ), 
+              alpha = 0.15, linetype = 0) +
+  theme_minimal() + 
+  labs(x=expression(paste('Wavelength (', mu, 'm)')), y='Reflectance') +
+  labs(subtitle = subtitle) + 
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=20),
+        legend.text=element_text(size=20),
+        legend.title=element_blank()) +
+  geom_rect(data = color_bars, 
+            aes(xmin = xmin, xmax = xmax, ymin = -0.015, ymax = 0), 
+            inherit.aes = FALSE, 
+            fill = color_bars$color) 
+  
+
+```
+
+```{r}
+# feature dataset only
+training_simp <- training %>% 
+  st_drop_geometry() %>% 
+  select(all_of(featureset), type2, STUSPS, dataset) 
+
+# PCA
+pca <- training_simp %>% 
+  select(-type2, STUSPS, dataset) %>% 
+  prcomp(center = TRUE, scale. = TRUE) 
+
+summary(pca)  
+
+# Get the proportion of variance explained by PCs
+pve <- summary(pca)$importance[2,]
+cumulative_pve <- cumsum(pve)
+
+# Create a data frame of var explained by PCs
+scree_data <- data.frame(
+  Component = 1:length(pve),
+  ProportionVariance = pve,
+  CumulativeVariance = cumulative_pve
+)
+
+# Plot var explained by PCs 
+ggplot(scree_data, aes(x = Component)) +
+  geom_line(aes(y = CumulativeVariance)) +
+  ylab("CumulativeProportion of Variance Explained") +
+  xlab("Principal Component") 
+```
+
+```{r}
+# PCA plot - PC1 and PC2
+autoplot(pca, data=select(training_simp, -c(STUSPS, dataset)), colour='type2', alpha=0.5, size=1.3) +
+  scale_color_manual(values = c("dry" = "#F8766D", "small (< 2 acre)" = "#00BA38", "large (>= 2 acre)" = "#619CFF")) + 
+  theme_minimal() + 
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=20))
+```
+
+```{r}
+# PCA plot - PC3 and PC4
+PC3 <- round(summary(pca)$importance[2,3]*100,2)
+PC4 <- round(summary(pca)$importance[2,4]*100,2)
+
+ggplot(pca, aes(x=PC3, y=PC4, color=training$type2)) +
+  geom_point(alpha=0.5, size=1.3) +
+  theme_minimal() +
+  labs(title = "PCA: PC3 vs PC4",
+       x = paste0("PC3 (", PC3, "%)"),
+       y = paste0("PC4 (", PC4, "%)")) + 
+  scale_color_manual(values = c("dry" = "#F8766D", "small (< 2 acre)" = "#00BA38", "large (>= 2 acre)" = "#619CFF")) + 
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=20))
+```
+
+```{r}
+# biplot to understand PCs
+# The first PC uses SWIR, VVVH, NDVI, RE, NDRE, NDWWI, TCG, TCW, spei30d_1...
+# The 2nd PC uses AVWI, NDMI/NDWI, z...
+biplot(pca) 
+```
+
+# PCA on subsets
+```{r}
+
+pca_subset <- function(df, stusps, year){
+  
+  pca <- 
+    training %>%
+    st_drop_geometry() %>% 
+    filter(L3mod==stusps & dataset==year) %>%
+    select(all_of(featureset)) %>%
+    prcomp(center = TRUE, scale. = TRUE) 
+
+  # PCA plot - PC1 and PC2
+  autoplot(pca, 
+           data=filter(df, L3mod==stusps & dataset==year), 
+           colour='type2', 
+           alpha=0.5, size=1.4) +
+    scale_color_manual(values = c(
+      "dry" = "#F8766D", 
+      "small (< 2 acre)" = "#00BA38", 
+      "large (>= 2 acre)" = "#619CFF")) + 
+    theme_minimal() + 
+    theme(axis.text=element_text(size=7),
+          axis.title=element_text(size=15)) + 
+    labs(title=paste(stusps, "-", year)) + 
+    theme(legend.position="none")
+}
+
+
+p1 <- pca_subset(training, stusps='Northwestern Plains', year='2019')
+p2 <- pca_subset(training, stusps='Aspen Parkland/Northern Glaciated Plains', year='2019')
+p3 <- pca_subset(training, stusps='Western Corn Belt Plains', year='2019')
+p4 <- pca_subset(training, stusps='Northern Forests', year='2019')
+p5 <- pca_subset(training, stusps='Lake Agassiz Plain', year='2019')
+grid.arrange(p1, p2, p3, p4, p5, ncol = 3)
+
+p6 <- pca_subset(training, stusps='Northwestern Plains', year='2020')
+p7 <- pca_subset(training, stusps='Aspen Parkland/Northern Glaciated Plains', year='2020')
+p8 <- pca_subset(training, stusps='Western Corn Belt Plains', year='2020')
+p9 <- pca_subset(training, stusps='Northern Forests', year='2020')
+p10 <- pca_subset(training, stusps='Lake Agassiz Plain', year='2020')
+grid.arrange(p6, p7, p8, p9, p10, ncol = 3)
+
+p11 <- pca_subset(training, stusps='Northwestern Plains', year='2022')
+p12 <- pca_subset(training, stusps='Aspen Parkland/Northern Glaciated Plains', year='2022')
+p13 <- pca_subset(training, stusps='Western Corn Belt Plains', year='2022')
+p14 <- pca_subset(training, stusps='Northern Forests', year='2022')
+p15 <- pca_subset(training, stusps='Lake Agassiz Plain', year='2022')
+grid.arrange(p11, p12, p13, p14, p15, ncol = 3)
+
+p16 <- pca_subset(training, stusps='Northwestern Plains', year='pair17')
+p17 <- pca_subset(training, stusps='Northwestern Plains', year='brood17')
+grid.arrange(p16, p17, ncol = 2)
+```
+
+# Correlations
+```{r}
+calculate_binwidth <- function(variable_data) {
+  # Example logic: calculate binwidth as range / number of bins
+  range_val <- diff(range(variable_data, na.rm = TRUE))
+  binwidth <- range_val / 30  # Example: 30 bins
+  return(binwidth)
+}
+
+training_preds %>%
+  mutate(type2 = case_when(type2=='dry' ~ 'dry',
+                           type2=='small (< 2 acre)' ~ 'sm',
+                           type2=='large (>= 2 acre)'~ 'lar')) %>%
+  pivot_longer(cols = -type2, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = type2, y = value, color = type2)) + 
+  #geom_point(alpha=0.1) +
+  geom_boxplot(outlier.shape = 16, outlier.size = 2) +
+  #ggplot(aes(x = value, fill=type2, color = type2)) + 
+  #geom_histogram(position = "identity", stat="bin", alpha = 0.5) +
+  facet_wrap(~ variable, scales = "free_y") +
+  labs(x = "Type", y = "Value") +
+  theme_minimal() + 
+  scale_color_manual(values = c("dry" = "red", "sm" = "forestgreen", "lar" = "blue")) 
+
+
+# create task for mlr3viz plots
+task = training %>%
+  rm_nonpred(keep_geom=TRUE, keep_type=TRUE) %>% 
+  select(-type2) %>%
+  mutate(type = as.factor(type)) %>% 
+  as_task_classif_st(target = "type", positive = "wet")
+
+# bunch of boxplot comparisons
+mlr3viz::autoplot(task, type = "duo")
+
+# more detailed...
+mlr3viz::autoplot(task, type = "pairs")
+
+
+# calculate + plot correlation matrix
+cormatrix <- training_preds %>%
+  mutate(wetordry = case_when(type2=="large (>= 2 acre)" ~ 2,
+                               type2=="small (< 2 acre)" ~ 2,
+                               type2=="dry" ~ 1)) %>%
+  select(-type2) %>%
+  cor() 
+
+# I'm really just interested in correlations with type2
+ordered_cormatrix <- cormatrix[order(abs(cormatrix[1:33, 34]), decreasing = TRUE), 34, drop = FALSE]
+
+corrplot(ordered_cormatrix, method = "circle", cl.pos = "n")
+legend("topright", legend = c("Negative Correlation", "Positive Correlation"),
+       fill = c("red", "blue"))
+```
+
+# Map: spatial distribution of GT points
+```{r}
+wet19samp_train <- training %>% filter(dataset=='2019' & type=='wet' & STUSPS != 'SD')
+dry19samp_train <- training %>% filter(dataset=='2019' & type=='dry' & STUSPS != 'SD')
+wet19samp_test <- testing %>% filter(dataset=='2019' & type=='wet' & STUSPS == 'SD')
+dry19samp_test <- testing %>% filter(dataset=='2019' & type=='dry' & STUSPS == 'SD')
+wet16samp_test <- testing %>% filter(dataset=='2016' & type=='wet')
+dry16samp_test <- testing %>% filter(dataset=='2016' & type=='dry')
+wet16sampAug_test <- testing %>% filter(dataset=='2016Aug' & type=='wet')
+dry16sampAug_test <- testing %>% filter(dataset=='2016Aug' & type=='dry')
+
+train19_map <- 
+  mapview(wet19samp_train, col.regions='blue', cex=4, layer.name = "training: wet 2019") + 
+  mapview(dry19samp_train, col.regions='yellow', cex=4, layer.name = "training: dry 2019") + 
+  mapview(states, alpha.regions = 0, lwd=2) + 
+  mapview(ppr, col.regions='grey')
+
+test19_map <- 
+  mapview(wet19samp_test, col.regions='blue', cex=4, layer.name = "test: wet 2019") + 
+  mapview(dry19samp_test, col.regions='yellow', cex=4, layer.name = "test: dry 2019") + 
+  mapview(states, alpha.regions = 0, lwd=2) + 
+  mapview(ppr, col.regions='grey')
+
+train19_map + test19_map
+
+
+mapview(wet16samp_test, col.regions='blue', cex=5, layer.name = "training: wet 2016") + 
+  mapview(dry16samp_test, col.regions='yellow', cex=5, layer.name = "training: dry 2016") + 
+  mapview(states, alpha.regions = 0, lwd=2) + 
+  mapview(ppr, col.regions='grey')
+
+mapview(wet16sampAug_test, col.regions='blue', cex=4, layer.name = "training: wet 2016 Aug") + 
+  mapview(dry16sampAug_test, col.regions='yellow', cex=4, layer.name = "training: dry 2016 Aug") + 
+  mapview(states, alpha.regions = 0, lwd=2) + 
+  mapview(ppr, col.regions='grey')
+
+mapview(ppr, col.regions='red', color='red', alpha.regions=0, lwd=6)
+```
+
