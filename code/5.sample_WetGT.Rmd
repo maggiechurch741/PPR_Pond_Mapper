@@ -1,0 +1,130 @@
+---
+title: "Sample Wet Points"
+author: Maggie Church
+date: "2024-09-24"
+updated: "2025-02-24"
+output: html_document
+---
+
+# Load libraries
+```{r, message=F, warning=F, results='hide'}
+library(tidyverse)
+library(sf)
+library(terra)
+library(here)
+
+utm14 <- 32614
+wgs <- 4326
+```
+
+# Read data
+Read in preprocessed, combined, and in-buffered HAPET data. Buffer allows 10-m pixels to be mostly wet. 
+```{r}
+# Load in-buffered HAPET data
+allPonds <- st_read(here("data", "intermediate", "buffered_ponds", "allPonds_inbuff75.shp"))
+```
+
+# Sample wet points
+Sample wet GT points: 100 wet points from each plot (and at least 1 point per pond)
+
+```{r}
+library(sf)
+library(dplyr)
+library(purrr)
+library(furrr)
+
+# Function to sample points from a polygon
+sample_points <- function(geometry, n) {
+  sampled <- st_sample(geometry, n, type = "random")
+  if (length(sampled) == 0) return(NULL) # Handle empty results
+  return(st_sf(geometry = sampled, crs = st_crs(geometry)))
+}
+
+# Function to sample points per plot
+sample_points_per_plot <- function(plot_polygons) {
+  n_polygons <- nrow(plot_polygons)
+  
+  if (n_polygons >= 100) {
+    # If 100+ polygons, sample one point per polygon
+    sampled_points <- map_dfr(plot_polygons$geometry, ~ sample_points(.x, 1))
+  } else {
+    # If fewer than 100 polygons, distribute extra points
+    extra_points_needed <- 100 - n_polygons
+    points_per_polygon <- rep(1, n_polygons)
+    
+    if (extra_points_needed > 0) {
+      extra_indices <- sample(seq_len(n_polygons), size = extra_points_needed, replace = TRUE)
+      for (i in extra_indices) points_per_polygon[i] <- points_per_polygon[i] + 1
+    }
+    
+    sampled_points <- map2_dfr(plot_polygons$geometry, points_per_polygon, sample_points)
+  }
+  
+  return(sampled_points)
+}
+
+# Parallelization
+plan(multisession, workers = parallel::detectCores() - 1)
+
+# Apply sampling function to each plot
+wetPoints_sf <- allPonds_inbuff75 %>%
+  group_split(plot_id) %>%
+  future_map_dfr(sample_points_per_plot)
+
+# Stop parallel processing
+plan(sequential)
+
+# Set CRS
+st_crs(wetPoints_sf) <- st_crs(allPonds_inbuff75)
+```
+
+ OLD 
+```{r}
+set.seed(123)
+
+# Function to sample 1 point from each pond
+safe_sample <- function(geometry) {
+  tryCatch({
+    sampled_point <- st_sample(geometry, 1, force = TRUE)
+    if (length(sampled_point) == 0) {
+      return(NA)
+    } else {
+      return(sampled_point)
+    }
+  }, error = function(e) {
+    return(NA)  # Return NA in case of error
+  })
+}
+
+# Sample points with error handling
+ wetPoints <- allPonds_inbuff75 %>%
+   mutate(sample_point = map(geometry, safe_sample)) %>%
+   filter(!map_lgl(sample_point, ~ all(is.na(.x))))  
+
+# Change the geometry from pond polygons to sample points
+ wetPoints_sf <- st_as_sf(
+  data.frame(
+    geometry = do.call(c, wetPoints$sample_point),
+    st_drop_geometry(wetPoints)
+  ) %>% select(-sample_point)
+ ) %>% st_set_crs(utm14)
+```
+
+# Export wet points
+```{r}
+# Get state info
+states <- st_read("data", "boundaries", "states") %>%
+  st_transform(utm14) %>% 
+  select(STATEFP, STUSPS)
+
+# Add state info to wet points
+wetPoints_sf_wstate <- wetPoints_sf %>%
+  st_join(states) %>%  # add state info
+  st_transform(wgs)    # set to WGS before exporting
+
+st_write(wetPoints_sf_wstate, here("data", "intermediate", "sampled_coordinates", "wet.shp", append=FALSE))
+```
+
+Next, I upload the exported wet points to GEE to extract their predictors, then save those results at PPR/samplePoints/data/inputs.
+
+Code for further analysis is found at `PPR/samplePoints/code`.

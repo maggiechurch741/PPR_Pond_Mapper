@@ -1,0 +1,44 @@
+---
+title: "Buffer Raw HAPET"
+author: Maggie Church
+date: "2025-02-24"
+updated: "2025-02-24"
+output: html_document
+---
+
+# Load libraries
+```{r, message=F, warning=F, results='hide'}
+library(tidyverse)
+library(sf)
+library(here)
+```
+
+# Read data
+Read in preprocessed and combined HAPET data (this is the output of `2.combine_raw_hapet.Rmd`).
+```{r}
+# Load HAPET data
+allPonds <- st_read(here("data", "allPonds", "allPond.shp"))
+```
+
+# In-buffer ponds
+Apply a 7.5m inward buffer to ponds, to ensure 10-m pixels are mostly wet (this takes a few minutes)
+```{r}
+# Remove pond edges
+allPonds_inbuff75 <- 
+  st_buffer(allPonds, -7.5) %>% 
+  filter(st_is_empty(geometry)==FALSE)  # drop ponds that get "buffered out"
+
+# Export
+st_write(allPonds_inbuff75, here("data", "intermediate", "buffered_ponds", "allPonds_inbuff75.shp"))
+```
+
+# In-buffer ponds
+Apply a 7.5m outward buffer to ponds, to ensure 10-m pixels are mostly dry (this takes a few minutes)
+```{r}
+# Remove pond edges
+allPonds_outbuff75 <- 
+  st_buffer(allPonds, 7.5) %>% 
+  filter(st_is_empty(geometry)==FALSE)  # drop ponds that get "buffered out"
+
+st_write(allPonds_outbuff75, here("data", "intermediate", "buffered_ponds", "allPonds_outbuff75.shp"))
+```

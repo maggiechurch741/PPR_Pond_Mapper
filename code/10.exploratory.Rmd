@@ -53,190 +53,20 @@ featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI","spe
 
 
 # Spectral Signature
+Notice the brood data looks different. And reflectance is generally higher in MT. 
 ```{r}
+source("~/Documents/CSU/PPR/analysis/analysis_9.19.24/code/plotss.R")
 
-######### plot spectral signature ######### 
-# compare SS of small pond vs large pond vs dry points - for training data
-
-class_means <- training %>%
-  #filter(type2 != 'small (< 2 acre)') %>%
-  as.data.frame() %>%
-  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type2) %>%
-  group_by(type2) %>%
-  summarize(across(everything(), mean))
-
-class_sd <- training %>%
- # filter(type2 != 'small (< 2 acre)') %>%
-  as.data.frame() %>%
-  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type2) %>%
-  group_by(type2) %>%
-  summarise(across(everything(), sd)) 
-  #summarise(across(everything(), std.error))
-
-class_means_bands <-
-  class_means %>%
-  pivot_longer(cols=blue:swir2, names_to="band") %>%
-  rename("mean"="value")
-
-class_sd_bands <-
-  class_sd %>%
-  pivot_longer(cols=blue:swir2, names_to="band") %>%
-  rename("sd"="value")
-
-class_bands <- inner_join(class_sd_bands, class_means_bands, by = c("type2", "band")) %>% #, sz_clss) %>%
-  mutate(band_acr = case_when(
-    band=="blue"~"B",
-    band=="green"~"G",
-    band=="red"~"R",
-    band=="red_edge_1"~"RE1",
-    band=="red_edge_2"~"RE2",
-    band=="red_edge_3"~"RE3",
-    band=="nir"~"NIR",
-    band=="swir1"~"SWIR1",
-    band=="swir2"~"SWIR2"
-  )) %>%
-  mutate(band_cw = case_when( # cw = central wavelength
-    band=="blue"~ .49,
-    band=="green"~ .56,
-    band=="red"~ .665,
-    band=="red_edge_1"~ .705,
-    band=="red_edge_2"~ .74,
-    band=="red_edge_3"~ .783,
-    band=="nir"~ .842,
-    band=="swir1"~ 1.61,
-    band=="swir2"~ 2.19
-  ))
-
-subtitle <- "  Dotted lines show average surface reflectance.
-Error bar shows stardard deviation for each landcover type (+/- 1 sd).
-Training data only."
-
-# Define S2 wavelength ranges and corresponding colors
-color_bars <- data.frame(
-  xmin = c(.457, .542, .650, .6975, .7325, .773, .7845, 1.565, 2.100),  # Starting wavelengths
-  xmax = c(.522, .577, .680, .7125, .7475, .793, .8995, 1.655, 2.280),  # Ending wavelengths
-  color = c("blue", "forestgreen", "red", "brown3", "brown3", "brown3", "tan4", "grey50", "grey30")  # Corresponding colors
-)
-
-# plot
-class_bands %>% 
-  #filter(type2 != 'small (< 2 acre)') %>%
-  #filter(type2 != 'large (>= 2 acre)') %>%
-  ggplot(aes(x = band_cw,
-             y = mean,
-             group = type2, 
-             color = factor(type2, levels = c("dry", "small (< 2 acre)", "large (>= 2 acre)"))
-             )) +
-  geom_line(linetype='dashed' ) + #, size=2) +    
-  geom_ribbon(aes(ymin = mean - sd, 
-                  ymax = mean + sd,
-                  fill = factor(type2, levels = c("dry", "small (< 2 acre)", "large (>= 2 acre)"))
-                  ), 
-              alpha = 0.15, linetype = 0) +
-  theme_minimal() + 
-  labs(x=expression(paste('Wavelength (', mu, 'm)')), y='Reflectance') +
-  labs(subtitle = subtitle) + 
-  theme(axis.text=element_text(size=20),
-        axis.title=element_text(size=20),
-        legend.text=element_text(size=20),
-        legend.title=element_blank()) +
-  geom_rect(data = color_bars, 
-            aes(xmin = xmin, xmax = xmax, ymin = -0.015, ymax = 0), 
-            inherit.aes = FALSE, 
-            fill = color_bars$color) #+
-  #scale_color_manual(values = c("dry" = "red", "small (< 2 acre)" = "forestgreen", "large (>= 2 acre)" = "blue")) +
-  #scale_fill_manual(values = c("dry" = "red", "small (< 2 acre)" = "forestgreen", "large (>= 2 acre)" = "blue")) 
-  
-```
-```{r}
-# same as above but just wet vs dry
-class_means <- training %>%
-  as.data.frame() %>%
-  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type) %>%
-  group_by(type) %>%
-  summarize(across(everything(), mean))
-
-class_sd <- training %>%
-  as.data.frame() %>%
-  dplyr::select(blue, green, red, nir, red_edge_1, red_edge_2, red_edge_3, swir1, swir2, type) %>%
-  group_by(type) %>%
-  summarise(across(everything(), sd)) 
-
-class_means_bands <-
-  class_means %>%
-  pivot_longer(cols=blue:swir2, names_to="band") %>%
-  rename("mean"="value")
-
-class_sd_bands <-
-  class_sd %>%
-  pivot_longer(cols=blue:swir2, names_to="band") %>%
-  rename("sd"="value")
-
-class_bands <- inner_join(class_sd_bands, class_means_bands, by = c("type", "band")) %>% #, sz_clss) %>%
-  mutate(band_acr = case_when(
-    band=="blue"~"B",
-    band=="green"~"G",
-    band=="red"~"R",
-    band=="red_edge_1"~"RE1",
-    band=="red_edge_2"~"RE2",
-    band=="red_edge_3"~"RE3",
-    band=="nir"~"NIR",
-    band=="swir1"~"SWIR1",
-    band=="swir2"~"SWIR2"
-  )) %>%
-  mutate(band_cw = case_when( # cw = central wavelength
-    band=="blue"~ .49,
-    band=="green"~ .56,
-    band=="red"~ .665,
-    band=="red_edge_1"~ .705,
-    band=="red_edge_2"~ .74,
-    band=="red_edge_3"~ .783,
-    band=="nir"~ .842,
-    band=="swir1"~ 1.61,
-    band=="swir2"~ 2.19
-  ))
-
-subtitle <- "  Dotted lines show average surface reflectance.
-Error bar shows stardard deviation for each landcover type (+/- 1 sd).
-Training data only."
-
-# Define S2 wavelength ranges and corresponding colors
-color_bars <- data.frame(
-  xmin = c(.457, .542, .650, .6975, .7325, .773, .7845, 1.565, 2.100),  # Starting wavelengths
-  xmax = c(.522, .577, .680, .7125, .7475, .793, .8995, 1.655, 2.280),  # Ending wavelengths
-  color = c("blue", "forestgreen", "red", "brown3", "brown3", "brown3", "tan4", "grey50", "grey30")  # Corresponding colors
-)
-
-# plot
-class_bands %>% 
-  #filter(type2 != 'small (< 2 acre)') %>%
-  #filter(type2 != 'large (>= 2 acre)') %>%
-  ggplot(aes(x = band_cw,
-             y = mean,
-             group = type, 
-             color = factor(type, levels = c("dry", "wet"))
-             )) +
-  geom_line(linetype='dashed' ) + #, size=2) +    
-  geom_ribbon(aes(ymin = mean - sd, 
-                  ymax = mean + sd,
-                  fill = factor(type, levels = c("dry", "wet"))
-                  ), 
-              alpha = 0.15, linetype = 0) +
-  theme_minimal() + 
-  labs(x=expression(paste('Wavelength (', mu, 'm)')), y='Reflectance') +
-  labs(subtitle = subtitle) + 
-  theme(axis.text=element_text(size=20),
-        axis.title=element_text(size=20),
-        legend.text=element_text(size=20),
-        legend.title=element_blank()) +
-  geom_rect(data = color_bars, 
-            aes(xmin = xmin, xmax = xmax, ymin = -0.015, ymax = 0), 
-            inherit.aes = FALSE, 
-            fill = color_bars$color) 
-  
-
+training %>% 
+  st_drop_geometry() %>% 
+  plotss(grouping_var = type, 
+         CI=F,
+         band_cindices = c(24, 15, 8, 27, 29, 30, 10, 2, 4),
+         subtitle="",
+         title="SD")
 ```
 
+## PCA
 ```{r}
 # feature dataset only
 training_simp <- training %>% 

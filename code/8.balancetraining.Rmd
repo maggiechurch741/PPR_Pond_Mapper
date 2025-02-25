@@ -1,0 +1,193 @@
+---
+title: "Balance Training Data"
+author: "Maggie Church"
+date: "October 12, 2024"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+  markdown: 
+    wrap: 72
+---
+
+Balance training data spatiotemporally
+Cols added: grid_id, ecoregion, and block (cluster-dataset)
+
+```{r, message=F}
+# install.packages("Ckmeans.1d.dp")
+# install.packages("tidyterra")
+
+library(tidyverse)
+library(sf)
+library(here)
+
+ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(4326)
+```
+
+Load training data
+```{r, message=F}
+training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk.shp")) %>%
+  filter(!(red==0 & nir==0)) # drop this 1 row
+```
+
+## create PPR grid
+```{r}
+# add a grid
+grid <- st_make_grid(ppr, n=25) 
+index <- which(lengths(st_intersects(grid, ppr)) > 0)
+grid_ppr <- grid[index]
+
+# convert the grid to sf
+grid_sf <- grid_ppr %>%  
+  st_as_sf() %>%
+  mutate(grid_id = row_number()) 
+
+# add grid_id to dataset
+training <- training %>% 
+  st_join(grid_sf, join = st_intersects)
+```
+
+## balance dataset
+
+Class balancing usually works by adding or removing rows (or adjusting weights).
+
+The common situation is that your classes themselves are unbalanced. For that, check out [this documentation](https://mlr-org.com/gallery/basic/2020-03-30-imbalanced-data/index.html).
+
+My goal is to balance my samples spatially across the "grid," within each year. Basically, I don't want to over-train in one region. Remaining data gaps include:
+
+-   W. MT has none 2019
+
+-   IA has none in 2020
+
+-   2017 is ND-only
+
+-   2020 has none \<2 acres
+
+```{r}
+set.seed(123)
+
+# Define threshold for undersampling and oversampling
+balanced_thresh <- 100
+
+# Undersample in high-density cells - thin points to meet 100 points per type
+undersampled <- training %>%
+  group_by(type, dataset, grid_id) %>% 
+  filter(n() >= balanced_thresh) %>%
+  sample_n(balanced_thresh) 
+
+# Oversample in low-density cells - duplicate points to meet 100 points per type
+oversampled <- training %>%
+  group_by(type, dataset, grid_id) %>% 
+  mutate(n_points = n()) %>% 
+  filter(n_points < balanced_thresh) %>%  
+  do({
+    # Get the number of needed points
+    needed_points <- balanced_thresh - unique(.$n_points)  
+    # Sample new points with replacement to augment points
+    augmented_points <- slice_sample(., n = needed_points, replace = TRUE)  
+    # Combine original and augmented points
+    bind_rows(., augmented_points)  
+  }) %>% 
+  ungroup() 
+
+# Combine the undersampled and oversampled datasets
+balanced_training <- 
+  bind_rows(undersampled, oversampled) %>% 
+  # drop the dry points from a grid-year if it didn't have any wet points
+  group_by(dataset, grid_id) %>% 
+  filter(!is.na(sum(type=="wet")) & sum(type=="wet") > 0) %>% 
+  ungroup() 
+```
+
+## Create blocks for CV
+(5 groups per full year, 1 for each 2017 season)
+```{r}
+set.seed(123)
+
+train_yrs_fullppr <- c("2019", "2022", "2022", "2023", "2024")
+
+######################
+# Function to perform k-means on each dataset's coordinates
+perform_kmeans <- function(data) {
+  coords <- st_coordinates(data)  
+  kmeans_result <- kmeans(coords, centers = 5, algorithm = "Lloyd", iter.max = 60)
+  data$cluster_id <- kmeans_result$cluster
+  return(data)  
+}
+
+# Split by dataset and apply kmeans to each group 
+clusters <- balanced_training %>%
+  filter(dataset %in% train_yrs_fullppr) %>%
+  group_split(dataset) %>%
+  lapply(perform_kmeans) %>% 
+  bind_rows() %>% 
+  bind_rows(balanced_training %>% filter(!dataset %in% train_yrs_fullppr) %>% mutate(cluster_id=1)) %>% 
+  ungroup() %>% 
+  mutate(block = paste(cluster_id, "-", dataset))
+```
+
+# Figures
+
+Visualize spatial balance
+```{r, eval=F}
+temp <- st_join(grid_sf, training, join = st_intersects) %>% 
+  filter(type=="wet") %>% 
+  group_by(grid_id.x, dataset) %>% 
+  count() 
+
+mapview(temp %>% filter(n < 100),  col.regions="red") +
+  mapview(temp %>% filter(n >= 100),  col.regions="blue") 
+```
+
+Calculate how many ponds we thin/oversample
+```{r, eval=F}
+
+# these are the ponds we'll thin
+n_undersampled_pre <- training %>%
+  st_drop_geometry() %>%
+  filter(type=="wet") %>% 
+  group_by(dataset, grid_id) %>% 
+  filter(n() >= balanced_thresh) %>% 
+  nrow()
+
+n_undersampled_post <- undersampled %>% 
+  st_drop_geometry() %>%
+  filter(type=="wet") %>% 
+  nrow()
+
+# these are the ponds we'll oversample
+n_oversampled_pre = training %>%
+  st_drop_geometry() %>%
+  filter(type=="wet") %>% 
+  group_by(dataset, grid_id) %>% 
+  filter(n() < balanced_thresh) %>% 
+  nrow()
+
+n_oversampled_post <- oversampled %>% 
+  st_drop_geometry() %>%
+  filter(type=="wet") %>% 
+  nrow()
+
+# total ponds
+n_total <- training %>% 
+  st_drop_geometry() %>%
+  filter(type=="wet") %>% 
+  nrow()
+
+n_bal_total <- balanced_training %>% 
+  st_drop_geometry() %>%
+  filter(type=="wet") %>% 
+  nrow()
+
+
+n_total                                  # n training ponds
+n_undersampled_pre - n_undersampled_post # (-) we thin this many
+n_oversampled_post - n_oversampled_pre   # (+) we oversample this many
+n_bal_total                              # n balanced training ponds
+```
+
+# Export
+Write balanced training dataset to disk
+```{r}
+clusters %>% st_write(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.shp"), append=F)
+clusters %>% write_csv(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.csv"))
+```

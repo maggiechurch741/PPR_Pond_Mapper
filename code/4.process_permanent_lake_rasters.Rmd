@@ -1,20 +1,16 @@
 ---
-title: "2b Process Permanent Lakes"
-output: html_document
+title: "Process Permanent Lakes"
+author: Maggie Church
 date: "2024-09-24"
-author: "maggie church"
+updated: "2025-02-24"
+output: html_document
 ---
 
-**Steps:**
+This script reads in the Permanent Lake layer (created in GEE, consists of 6 large tiles) and crops it into 651 rasters that overlay each of our plots.
 
-1.  Break the larger tiles into plot-size rasters. Save all 651 plot-size rasters to intermediate data folder.
+Link to GEE code that creates the Permanent Lake layer [here](https://code.earthengine.google.com/967bd27fac16af729ef93dc1fd53d1e0){.uri}. Note this is EPSG=32614 (UTM 14N)
 
-**Inputs**:
-
--   Plot boundaries (note these don't apply to the 2016-2017 data).
-
--   Permanent lake layer tiles. I created the permanent lake layer in GEE, [here](https://code.earthengine.google.com/967bd27fac16af729ef93dc1fd53d1e0){.uri}. Raster format, utm zone 14N crs.
-
+# Setup environment and load libraries
 ```{r}
 library(sf)
 library(dplyr)
@@ -22,19 +18,19 @@ library(terra)
 library(future.apply)
 library(parallel)
 library(tools)
+library(here)
 
 utm14 <- 32614
 w <- detectCores()
-temp_dir <- "../data/intermediate" 
-raw_dir <- ("~/Documents/PPR/raw_data/GreatPlains/raw_data/")  # raw HAPET data folder
 ```
 
-Load plot boundaries and apply buffer.
+# 1. Break permanent lake raster tiles into plot-size rasters
 
+Load plot boundaries and apply buffer.
 ```{r}
 # read in plot boundary data
 plots <- 
-  st_read(dsn = paste0(raw_dir, 'FWS_2018_2019/FSMS_Enterprise_Albers.gdb'), layer='FSMS_PLOTS') %>%
+  st_read(here("data", "allPlots")) %>%
   st_transform(utm14)
 
 # apply inwards plot buffer 
@@ -43,6 +39,8 @@ plots_inbuff75 <- st_buffer(plots, -7.5)
 
 This next chunk creates the function we'll use to split these tiles up. If a plot covers multiple tiles, crops from each tile are merged to cover full plot extent.
 
+p is a plot id
+rasters is a list of large rasters
 ```{r}
 # Function to crop raster tiles by plots
 crop_raster <- function(p, rasters) {
@@ -80,7 +78,7 @@ crop_raster <- function(p, rasters) {
     }
     
     # Define the output file name based on the plot ID
-    output_file <- paste0(temp_dir, "/cropped_permWater_rasters/raster_", p, ".tif")
+    output_file <- paste0(here("data", "intermediate", "raster_processing", "cropped_permWater_rasters"), "/raster_", p, ".tif")
     
     # Save the merged raster
     writeRaster(merged_raster, output_file, overwrite = TRUE)
@@ -93,9 +91,6 @@ crop_raster <- function(p, rasters) {
 ```
 
 Now we run the function! I use parallel processing to speed things up... this part only takes a few minutes.
-
-I exported the permanent lakes layer from GEE, which split the region into 6 tiles. There, you'll see I used the JRC water history data to determine the spatial extent of permanent lakes. This layer was exported in crs: UTM Zone 14N.
-
 ```{r}
 # Get unique plot IDs
 plot_ids <- unique(plots_inbuff75$Plot)
@@ -103,15 +98,15 @@ plot_ids <- unique(plots_inbuff75$Plot)
 # set up parallel processing
 plan(multisession, workers = w-2)
 
-# Load all raster tiles from step 2
-files_processed <- list.files("../data/inputs/gee_rasters/permanentWater", full.names = TRUE)
-rasters <- lapply(files_processed, rast)
+# Load all 6 big raster tiles 
+files <- list.files(here("data", "gee_exports", "gee_rasters", "permanentWater"), full.names = TRUE)
+rasters <- lapply(files, rast)
 
 # Apply the function to each plot
 result_files <- lapply(plot_ids, function(p) {
   crop_raster(p, rasters)
 })
 
-# Reset the plan to sequential (no parallelization)
+# Reset the plan to sequential (stop parallelization)
 plan(sequential)
 ```

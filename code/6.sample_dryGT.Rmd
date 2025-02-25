@@ -3,78 +3,70 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-**Description**: Limit the Possibility Layer to known dry areas. We will sample dry points from within this area, to train the model what is dry.
+**Description**: Limit the Possibility Layer to known dry areas (not wet in HAPET, and not a permanent water body). We will randomly sample dry points from within this area, to train the model what is dry.
 
-**Inputs**:
-
--   HAPET ponds (output of `1.combineRawHapet.Rmd`)
-
--   Plot-level rasters of the possibility layer (output of `2.process_possibility_rasters.Rmd`)
-
--   Plot-level rasters of the permanent lakee layer (output of `2.process_permanent_lakes.Rmd`)
-
--   State boundaries
-
-**Output**: shapefile of sampled dry points, keeping attributes.
+The output of this is a shapefile of sampled dry points - we'll use this to split train/test, and extract remotely-sensed features.
 
 **Steps:** For a given plot:
 
 1.  load possibility raster for that plot
 
-    ![](images/1.poss.png){width="400"}
+```{r, echo=FALSE}
+knitr::include_graphics(here("figures", "dry_sampling_steps_plot262", "1.poss.png"))
+```
 
 2.  remove edges
 
-    ![](images/2.poss_remove_edges.png){width="400"}
+    ![](images/2.poss_remove_edges-01.png){width="198"}
 
 3.  get ponds
 
-    ![](images/3.ponds.png){width="400"}
+    ![](images/3.ponds.png){width="208"}
 
 4.  get permanent water
 
-    ![](images/4.permWater.png){width="400"}
+    ![](images/4.permWater-01.png){width="208"}
 
 5.  mask ponds and permanent water from possibility layer
 
-    ![](images/5.dryROI.png){width="400"}
+    ![](images/5.dryROI-01.png){width="198"}
 
-6.  Sample points within this dry ROI
+6.  randomly sample points within this dry ROI
 
-    ![](images/6.sampled_points.png){width="400"}
+    ![](images/6.sampled_points-01.png){width="191"}
 
-Load packages:
+## Load packages:
 
 ```{r, message=F, warning=F}
+library(tidyverse)
 library(sf)
-library(dplyr)
-library(mapview)
-library(purrr)
-library(tidyr)
-library(stringr)
 library(terra)
 library(future.apply)
 library(parallel)
 library(tools)
+library(mapview)
 
 w <- detectCores()
-temp_dir <- "../data/intermediate"
 
 utm14 <- 32614
 wgs <- 4326
 ```
 
-Load HAPET pond boundaries and apply a 7.5m buffer. 
+## Load HAPET pond boundaries and apply a 7.5m buffer.
 
 ```{r, message=F, warning=F}
 # read in preprocessed and combined HAPET data
-allPonds <- st_read("../data/allPonds/allPond_fixed.shp")
+allPonds <- st_read(here("data", "allPonds"))
 
 # apply 15m outward buffer to ponds
 ponds_outbuff75 <- st_buffer(allPonds, 7.5)
+
+# List raster files
+cropped_poss_files <- list.files(here("data", "intermediate", "raster_processing", "cropped_poss_rasters"), full.names = TRUE) 
+cropped_permWater_files <- list.files(here("data", "intermediate", "raster_processing", "cropped_permWater_rasters"), full.names = TRUE) 
 ```
 
-Remove known wet areas from possibility layer -\> sample dry points.
+## create fn to remove known wet areas from possibility layer -\> sample dry points.
 
 ```{r}
 # Define a function to process each plot
@@ -100,17 +92,26 @@ sample_dry <- function(p, d) {
   # 4. Get the permanent water for this plot
   perm_file <- grep(paste0("_", p, "\\.tif$"), cropped_permWater_files, value = TRUE)
   
+  # Snap permanent water raster to poss_i -- add a 30m buffer too
   perm_i <- perm_file %>%
       rast() %>%        
-      resample(poss_i)  # Snap to poss_i
+      resample(poss_i) 
   
   # Convert 0 to NA
   perm_i <- mask(perm_i, perm_i, maskvalue = FALSE)   
+  
+  # add 30m buffer to the permanent water raster
+  perm_i <- perm_i %>% focal(w = matrix(1, 7, 7), fun = max, na.rm = TRUE) 
+  
+  # Add some areas that the perm water layer missed (I created this layer manually)
+  perm_more <- st_read(here("data", "intermediate", "jrc_missed")) %>% 
+    st_transform(st_crs(perm_i)$wkt)
 
   # 5. Remove actively wet areas from the possibility raster for this plot
   dryROI_subset <- poss_i %>%
-    mask(ponds_i, inverse = TRUE) %>%
-    mask(perm_i, inverse = TRUE)
+    mask(ponds_i, inverse = TRUE) %>% 
+    mask(perm_i, inverse = TRUE) %>% 
+    mask(perm_more, inverse = TRUE) 
   
   # 6. Sample points (200 per plot-year)
   sampled_points <- 
@@ -136,18 +137,15 @@ sample_dry <- function(p, d) {
 }
 ```
 
-Run function
+## Run function
 
 Btw plots 914 and 945 are missing from the possibility rasters... They're outside of the PPJV boundary.
+
 ```{r}
 set.seed(123)
 
 # set up parallel processing
 plan(multisession, workers = w-2)
-
-# List raster files
-cropped_poss_files <- list.files(paste0(temp_dir, "/cropped_poss_rasters"), full.names = TRUE) 
-cropped_permWater_files <- list.files(paste0(temp_dir, "/cropped_permWater_rasters"), full.names = TRUE) 
 
 # Initialize a list to store results for all datasets
 all_sampled_points_list <- list()
@@ -180,12 +178,11 @@ dryPoints_sf <- bind_rows(all_sampled_points_list, .id = "dataset")
 
 # Reset the plan to sequential (no parallelization)
 plan(sequential)
-
 ```
 
 ```{r}
 # Get state info
-states <- st_read('./../../states') %>%
+states <- st_read(here("data", "boundaries", "states")) %>%
   st_transform(utm14) %>% 
   select(STATEFP, STUSPS)
 
@@ -194,7 +191,7 @@ dryPoints_sf_wstate <- dryPoints_sf %>%
   st_join(states) %>%  # add state info
   st_transform(wgs)    # set to WGS before exporting
 
-st_write(dryPoints_sf_wstate, "../data/sampled_points/dry.shp", append=FALSE)
+st_write(dryPoints_sf_wstate, here("data", "intermediate", "sampled_coordinates", "dry.shp"), append=FALSE)
 ```
 
 ```{r, echo=F, eval=F}

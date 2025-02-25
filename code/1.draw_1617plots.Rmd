@@ -1,22 +1,47 @@
+---
+title: "Draw 2016/2017 Plot Boundaries"
+author: Maggie Church
+date: "2024-07-17"
+updated: "2025-02-24"
+output: html_document
+---
+
+We have a shapefile containing the plot boundaries for the areas that HAPET typically surveys annually. However, the 2016-2017 dataset surveyed additional plots. We need to manually draw the boundaries for 2016-2017 plots. 
+
+1. This script creates an RShiny app that opens a map of the 2016-2017 delineated ponds, and logs the coordinates for rectangles drawn within the app. I use this to eyeball plot boundaries. 
+2. I manually create polygon objects from those coordinates
+3. I combine polygons into an sf object of 2016-2017 plot boundaries and create a plot id
+4. Add these hand-drawn 2016-2017 plots to the usual plot boundaries
+5. Export to data/allPlots
+
+# Load libraries
 ```{r}
 library(shiny)
 library(leaflet)
 library(leaflet.extras)
 library(dplyr)
 library(sf)
-library(mapview)
+library(here)
+
+wgs <- 4326
 ```
 
+# Read in data
 ```{r}
-# read in preprocessed and combined HAPET data
-allPonds <- st_read("../data/allPonds/allPond.shp")
+# read in 2016-2017 HAPET data
+pair16 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "16PairsWAFinished.shp")) %>% st_transform(wgs)
+brood16 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "16BroodsWAFinished.shp")) %>% st_transform(wgs)
+pair17 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "17PairsWAFinished.shp")) %>% st_transform(wgs)
+brood17 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "17BroodsWAFinishedSurveyed.shp")) %>% st_transform(wgs)
 
-needs_plots <- allPonds %>% 
-  filter(dataset %in% c("pair16", "brood16", "pair17", "brood17")) %>% 
-  st_transform(4326)
+# combine
+needs_plots <- bind_rows(pair16, brood16, pair17, brood17)
+
+# read in 2019-2024 plot boundaries
+plots <- st_read(dsn = here("data", "raw_hapet", "FWS_2018_2019", "FSMS_Enterprise_Albers.gdb"), layer='FSMS_PLOTS') %>% st_transform(wgs)
 ```
 
-Open a UI to streamline plot delineation
+# 1. Open a UI to streamline plot delineation
 ```{r, eval=F}
 ui <- fluidPage(
   leafletOutput("map", height = "1000px"),  # Set the height to 600px
@@ -77,7 +102,8 @@ output$map <- renderLeaflet({
 shinyApp(ui, server)
 ```
 
-Add plot coordinates from the UI here
+# 2. Add plot bbox coordinates from the UI here
+Note, I did miss some small ponds near plot boundaries, that's ok.
 ```{r}
 # plot
 p1 <- list(matrix(c(
@@ -619,58 +645,31 @@ p77 <- list(matrix(c(
   st_sfc(crs = 4326) 
 ```
 
-Combine, and add plotid
+# 3. Combine hand-drawn 2016-2017 plots and create plotid
 ```{r}
 # Store all polygons in a list
 polygons_list <- list(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, p39, p40, p41, p42, p43, p44, p45, p46, p47, p48, p49, p50, p51, p52, p53, p54, p55, p56, p57, p58, p59, p60, p61, p62, p63, p64, p65, p66, p67, p68, p69, p70, p71, p72, p73, p74, p75, p76, p77)
 
 # get max plot id from HAPET
-max_hapet_plotid <- allPonds %>% st_drop_geometry() %>% summarize(max(Plot, na.rm=T)) %>% pull()
+max_hapet_plotid <- plots %>% st_drop_geometry() %>% summarize(max(Plot, na.rm=T)) %>% pull()
 
 # create new plot ids, atop the max id from HAPET 
 plot_ids <- 1:length(polygons_list) + max_hapet_plotid
 
 # Extract the actual polygon geometries from each sfc object
-plots <- lapply(polygons_list, function(p) p[[1]]) %>%
+plots_1617 <- lapply(polygons_list, function(p) p[[1]]) %>%
   st_sfc(crs = 4326) %>% 
   st_sf(Plot = plot_ids,
         geometry = .) 
 ```
 
-Write over allPonds, filling in the new pond ids. Some small ponds near plot boundaries didn't get assigned a plot, but that's ok. 
+# 4. Add these 2016-2017 boundaries to the 2019-2024 boundaries shp
 ```{r}
-# add plot id to 2016-2017 datasets
-join <- st_join(needs_plots, plots) %>%
-  rename(Plot=Plot.y) %>%
-  select(-Plot.x) 
-
-# some ponds span multiple plots - split these ponds by plot boundary
-dup <- join %>% 
-  group_by(rownum) %>%
-  filter(n()>1) %>% 
-  st_intersection(plots) %>% 
-  mutate(Plot=Plot.1) %>% 
-  select(-Plot.1)  %>% 
-  distinct()
-
-# add dups back to pond list. And reproject to UTM14N
-ponds_1617 <- join %>% 
-  group_by(rownum) %>%
-  filter(n()==1) %>%
-  bind_rows(dup) %>% 
-  st_transform(32614)
-
-# add all ponds + their new plot ids back to "allPonds"  
-allPonds_new <- allPonds %>% 
-  filter(!dataset %in% c("pair16", "brood16", "pair17", "brood17")) %>%
-  bind_rows(ponds_1617)
-
-# save over allPonds
-st_write(allPonds_new, "../data/allPonds/allPond_fixed.shp", append=FALSE)
+plots_all <- plots %>% rename(geometry=Shape) %>% bind_rows(plots_1617)
 ```
 
-Write plot boundaries to file
+# 5. Write plot boundaries to file
 ```{r}
-st_write(plots, "../data/intermediate/plots1617/plots_1617.shp", append=FALSE)
+st_write(plots_all, here("data", "allPlots", "allPlots.shp"), append=FALSE)
 ```
 

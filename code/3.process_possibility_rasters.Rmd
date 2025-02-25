@@ -1,10 +1,16 @@
 ---
-title: "2a. Process Possibility Rasters"
-output: html_notebook
+title: "Process Possibility Rasters"
+author: Maggie Church
 date: "2024-09-24"
-author: "maggie church"
+updated: "2025-02-24"
+output: html_document
 ---
 
+This script reads in the Possibility layer (created in GEE, consists of 8 large tiles) and crops it into 651 rasters that overlay each of our plots.
+
+Link to GEE code that creates the Possibility layer [here](https://code.earthengine.google.com/388a0678b7a0ff8d0705dbdaccf47e4c){.uri}. Note this is EPSG=4326.
+
+# Setup environment and load libraries
 ```{r}
 library(sf)
 library(dplyr)
@@ -12,28 +18,15 @@ library(terra)
 library(future.apply)
 library(parallel)
 library(tools)
+library(here)
 
 utm14 <- 32614
+utm14_str <- "+proj=utm +zone=14 +datum=WGS84 +units=m +no_defs"
 w <- detectCores()
-temp_dir <- "../data/intermediate" 
-raw_dir <- ("~/Documents/PPR/raw_data/GreatPlains/raw_data/")  # raw HAPET data folder
 ```
 
-**Steps:**
-
-1.  Reproject and self-mask possibility raster tiles. Save output to intermediate data folder.
-
-2.  Break the larger tiles into plot-size rasters. Save all 651 plot-size rasters to intermediate data folder.
-
-**Inputs**:
-
--   Plot boundaries (note these don't apply to the 2016-2017 data).
-
--   Possibility layer tiles. I created the Possibility Layer in GEE, [here](https://code.earthengine.google.com/388a0678b7a0ff8d0705dbdaccf47e4c){.uri}. Raster format, epsg:4326 crs.
-
-### 1. reproject and self-mask the larger tiles
-
-I exported the possibility layer from GEE, which split the region into 8 tiles. I should have exported straight to UTM Zone 14N, but instead I just deal with that reprojection here. I also self-mask the rasters here. Save to intermediate data folder. 
+### 1. reproject and self-mask the 8 larger tiles
+I exported the possibility layer from GEE, which split the region into 8 tiles. I should have exported straight to UTM Zone 14N, but instead I just deal with that reprojection here. I also self-mask the rasters here. Save to intermediate data folder.
 
 This first step takes a few hours :/
 ```{r}
@@ -41,7 +34,7 @@ This first step takes a few hours :/
 plan(multisession, workers=w-2) 
 
 # read in the list of possibility layer files
-files <-  list.files('../data/inputs/gee_rasters/possibilityLayer', full.names = TRUE)
+files <-  list.files(here("data", "gee_exports", "gee_rasters", "possibilityLayer"), full.names = TRUE)
 
 # Parallelize the raster loading, projecting, and masking
 loaded_poss_files <- future_lapply(files, function(file) {
@@ -53,7 +46,7 @@ loaded_poss_files <- future_lapply(files, function(file) {
   masked_rast <- mask(rast_proj, rast_proj, maskvalue = FALSE)
   
   # Write to disc...
-  temp_file <- paste0(temp_dir, "rastMask", file_path_sans_ext(basename(file)), ".tif")
+  temp_file <- paste0(here("data", "intermediate", "raster_processing", "possibility_utm14N"), "/", file_path_sans_ext(basename(file)), ".tif")
   writeRaster(masked_rast, temp_file)
   
   # but also return here...
@@ -69,21 +62,15 @@ plan(sequential)
 Load plot boundaries and apply buffer.
 ```{r, message=F, warning=F}
 # read in plot boundary data
-plots1617 <- 
-  st_read("../data/intermediate/plots1617/plots_1617.shp") %>%
-  st_transform(utm14) %>%
-  rename(Plot=plot_id)
-
 plots <- 
-  st_read(dsn = paste0(raw_dir, 'FWS_2018_2019/FSMS_Enterprise_Albers.gdb'), layer='FSMS_PLOTS') %>%
-  st_transform(utm14) %>% 
-  bind_rows(plots1617)
+  st_read(here("data", "allPlots")) %>%
+  st_transform(utm14)
 
 # apply inwards plot buffer 
 plots_inbuff75 <- st_buffer(plots, -7.5)
 ```
 
-This next chunk creates the function we'll use to split these Possibility tiles up. If a plot covers multiple tiles, crops from each tile are merged to cover full plot extent.
+This next chunk creates the function we'll use to crop the larger Possibility Layer tiles into smaller plot-size tiles, such that we get 1 small possibility raster that overlays each plot. If a plot covers multiple larger tiles, crops from each tile are merged to cover full plot extent.
 ```{r}
 # Function to crop raster tiles by plots
 crop_raster <- function(p, rasters) {
@@ -98,7 +85,7 @@ crop_raster <- function(p, rasters) {
   for (i in seq_along(rasters)) {
     raster <- rasters[[i]]  # Extract the raster from the list
 
-        # Crop the raster with error handling for non-overlapping extents
+    # Crop the raster with error handling for non-overlapping extents
     cropped_raster <- tryCatch({
         crop(raster, plot_extent)
       }, error = function(e) {
@@ -121,7 +108,7 @@ crop_raster <- function(p, rasters) {
     }
     
     # Define the output file name based on the plot ID
-    output_file <- paste0(temp_dir, "/cropped_poss_rasters/raster_", p, ".tif")
+    output_file <- paste0(here("data", "intermediate", "raster_processing", "cropped_poss_rasters"), "/raster_", p, ".tif")
     
     # Save the merged raster
     writeRaster(merged_raster, output_file, overwrite = TRUE)
@@ -133,7 +120,7 @@ crop_raster <- function(p, rasters) {
 }
 ```
 
-Now run the function! I use parallel processing to speed things up... this part only takes a few minutes. This write the plot-sized possibility rasters to the intermediate data folder. 
+Now run the function! I use parallel processing to speed things up... this part only takes a few minutes. This writes the plot-sized possibility rasters to the intermediate data folder. 
 ```{r}
 # Get unique plot IDs
 plot_ids <- unique(plots_inbuff75$Plot)
@@ -141,8 +128,8 @@ plot_ids <- unique(plots_inbuff75$Plot)
 # set up parallel processing
 plan(multisession, workers = w-2)
 
-# Load all raster tiles from step 2
-files_processed <- list.files(paste0(temp_dir, "/possibility_utm14N"), full.names = TRUE)
+# Load all raster tiles from step 1
+files_processed <- list.files(here("data", "intermediate", "raster_processing", "possibility_utm14N"), full.names = TRUE)
 rasters <- lapply(files_processed, rast)
 
 # Apply the function to each plot

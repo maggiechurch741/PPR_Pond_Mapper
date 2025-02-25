@@ -1,0 +1,198 @@
+---
+title: "sample_gtwpred_data"
+output: pdf_document
+date: "2024-08-16"
+---
+
+```{r}
+library(dplyr)
+library(readr)
+library(sf)
+library(purrr)
+
+set.seed(123)
+source(here("code", "helper_functions", "VIs.R"))
+```
+
+
+This script splits dry and wet data points (from scripts #5 and #6) into training and testing. 
+
+# read in GT points (2-wk composites)
+Wrangling steps: 
+- rescale S2 L1C values
+- drop values outside of -1 to 1
+- convert flyvr_d to date
+- calculate VIs
+- get 1 nonnull plot_id col (drops some points, mostly dubious dry ones)
+- equalize wet and dry points within a plot-survey 
+```{r}
+set.seed(1)
+
+# Define the folder path where shapefiles are located
+folder_path <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk")
+
+# List all .shp files in the folder (ensure full path is returned)
+shp_files <- list.files(path = folder_path, pattern = "\\.shp$", full.names = TRUE)
+
+# Read each shapefile into a list of sf objects
+shapefiles_list <- lapply(shp_files, function(file) {
+  
+    print(file)
+
+    st_read(file, quiet = TRUE) %>%
+    mutate(type = ifelse(grepl("wet", basename(file)), "wet", "dry")) %>% 
+    st_set_crs(4326) %>% 
+    return()
+ })
+
+band_cols <- c("blue", "green", "red", "red_edge_1", "red_edge_2", "red_edge_3", "nir", "swir1", "swir2")
+
+# Combine sf objects
+all_samples <- do.call(bind_rows, shapefiles_list) %>% 
+  dplyr::select(-b1) %>% 
+  # rescale S2 L1C values
+  mutate(across(all_of(band_cols),   
+                ~ if_else(dataset %in% c("pair16", "brood16", "pair17", "brood17"), .x * 10000, .x))) %>%
+  # drop values outside of -1 to 1
+  filter(!if_any(all_of(band_cols), ~ .x < -1 | .x > 1)) %>% 
+  # convert flyvr_d to date
+  mutate(flyvr_d = as.Date(as.POSIXct(flyvr_d / 1000, origin = "1970-01-01", tz = "UTC"))) %>% 
+  # use 1 col for plot_id
+  mutate(plot_id = if_else(!is.na(plot_id), plot_id, Plot)) %>% 
+  select(-Plot) %>% 
+  # Calculate VIs
+  moreVIs()
+
+# A bunch of wet points lost "plot_id" at some point... Get these back. 
+# I wonder if some of the dry sampling occurred outside of the designated area, bc there are lots of dry points outside of plots. Drop these. 
+plots <- st_read(here("data", "allPlots")) 
+all_samples <- all_samples %>%
+  st_join(select(plots, Plot)) %>% 
+  filter(!is.na(Plot)) %>% 
+  mutate(plot_id = if_else(!is.na(plot_id), plot_id, Plot)) 
+
+# Equalize wet and dry points within a plot-survey 
+# there are 21 plot-surveys where I didn't draw enough dry samples to match wet samples, and there are < 100
+all_samples <- all_samples %>%
+  group_split(dataset, plot_id) %>%  # Split into list by dataset-plot
+  map_dfr(~ {
+    n_wet <- sum(.x$type == "wet")  # Count wet points in this plot
+    sampled_dry <- .x %>%
+      filter(type == "dry") %>%
+      sample_n(size = min(n(), n_wet), replace = FALSE)  # Sample dry points
+    bind_rows(filter(.x, type == "wet"), sampled_dry)  # Combine with all wet points
+  })
+```
+
+For the 2wk data, we had valid pixels for 
+40% of May 2016
+46% of Aug 2016
+90% of May 2017
+22% of Aug 2017
+69% of 2019
+84% of 2021
+92% of 2022
+99% of 2023
+92% of 2024
+
+For the 4wk data, we had valid pixels for
+67% of May 2016
+95% of Aug 2016
+100% of May 2017
+90% of Aug 2017
+90% of 2019
+98% of 2021
+99% of 2022
+100% of 2023
+99% of 2024
+
+```{r}
+# don't drop band values between -1 to 1, for this (I drop them in the chunk above)
+all_samples %>% 
+  st_drop_geometry() %>%
+  group_by(dataset) %>% 
+  summarize(prop_valid = paste0(100-round(sum(red==-99990000 | red==-9999)/n()*100), "%"))
+```
+
+# Add modified Level-III ecoregion
+```{r}
+# load ecoregion boundaries
+ecoregion5 <- st_read(here("data", "boundaries", "reg5_eco_l3")) %>% st_transform(4326)
+ecoregion7 <- st_read(here("data", "boundaries", "reg7_eco_l3")) %>% st_transform(4326)
+ecoregion8 <- st_read(here("data", "boundaries", "reg8_eco_l3")) %>% st_transform(4326)
+
+# combine ecoregion layers
+ecoregions <- bind_rows(ecoregion5, ecoregion7, ecoregion8) %>% 
+  select(NA_L3NAME, NA_L2NAME)
+
+# load ppr boundary
+ppr <- st_read(here("data", "boundaries", "PPJV")) %>%
+  st_transform(4326)
+
+# get the ecoregions within the ppr
+ppr_ecoregions <- st_intersection(ecoregions, ppr)
+
+# modify ecoregion category, to consolidate (a region gets subsumed if <5 plots in it)
+ppr_ecoregions2 <- ppr_ecoregions %>% 
+  mutate(L3mod = case_when(
+    NA_L3NAME %in% c("Northwestern Great Plains", "Middle Rockies", "Canadian Rockies", "Northwestern Glaciated Plains") ~ "Northwestern Plains",
+    NA_L3NAME %in% c("North Central Hardwood Forests", "Northern Lakes and Forests") ~ "Northern Forests",
+    NA_L3NAME %in% c("Lake Manitoba and Lake Agassiz Plain", "Northern Minnesota Wetlands") ~ "Lake Agassiz Plain",
+    NA_L3NAME %in% c("Western Corn Belt Plains", "Driftless Area") ~ "Western Corn Belt Plains",
+    T ~ NA_L3NAME
+  ))
+
+# add modified ecoregion to points
+all_samples <- all_samples %>% st_join(ppr_ecoregions2) 
+```
+
+# Determine testing set
+I'll test on test on 2016 (wet) and 2019 (dry)
+Randomly select plots for out-of-space testing set: 10% of plots within each ecoregion
+```{r}
+set.seed(1)
+
+testyrs <- c("pair16", "brood16", "2019")
+ndyrs <- c("pair17", "brood17")
+
+# sample 10% of plots from each L3mod, for 2021-2024
+test_plot_ids21_24 <- all_samples %>% 
+  st_drop_geometry() %>% 
+  filter(type=="wet" & !(dataset %in% testyrs) & !(dataset %in% ndyrs)) %>% 
+  distinct(plot_id, L3mod) %>% 
+  group_by(L3mod) %>% 
+  sample_frac(0.1) %>% 
+  distinct(plot_id) %>% 
+  pull(plot_id) 
+
+# sample 10% of plots for 2017
+test_plot_ids17 <- all_samples %>% 
+  st_drop_geometry() %>% 
+  filter(type=="wet" & dataset %in% ndyrs) %>% 
+  distinct(plot_id) %>% 
+  sample_frac(0.1) %>% 
+  pull(plot_id) 
+
+# combine sampled plots
+test_plot_ids <- c(test_plot_ids21_24, test_plot_ids17)
+```
+
+Alternatively, hand-pick 5 per L3mod: 
+test_plot_ids <- c(954, 992, 504, 182, 391, 629, 369, 48, 197, 29, 768, 282, 209, 37, 59, 316, 265, 765, 217, 271, 284, 760, 832, 830, 246)
+
+# Export training and testing
+```{r}
+# get test from novel areas and years
+testing <- all_samples %>% 
+  filter(dataset %in% testyrs | plot_id %in% test_plot_ids) %>%
+  distinct()
+ 
+# get train data
+training <- all_samples %>% 
+  filter(!(dataset %in% testyrs | plot_id %in% test_plot_ids)) %>% 
+  distinct()
+
+st_write(training, here("data", "train_test_data", "unbalanced_training", "training_2wk.shp"), append=F)
+st_write(testing,  here("data", "train_test_data", "testing", "testing_2wk.shp"), append=F)
+write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk.csv"))
+```

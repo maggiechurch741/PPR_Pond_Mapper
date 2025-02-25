@@ -1,0 +1,316 @@
+---
+title: "Combine Raw HAPET"
+author: Maggie Church
+date: "2024-07-17"
+updated: "2025-02-24"
+output: html_document
+---
+
+This script reads in raw HAPET wet polygons
+
+- Sets crs to UTM Zone 14N throughout pre-processing (the distortion for plots outside of Zone 14N is negligible)
+- The performs specific pre-processing steps to different survey periods (2016-2017, 2019, 2020, 2021+)
+- Drops polygons < 400m2
+- Exports combined wet polygons to data/allPonds
+
+# Setup environment and load libraries
+```{r}
+Sys.setenv("SHAPE_RESTORE_SHX" = "YES")
+
+library(tidyverse)
+library(sf)
+library(here)
+
+set.seed(10)
+
+wgs <- 4326
+utm14 <- 32614
+
+# I guess turning off s2 spherical processing loosens the rules about geometric validity.
+# Using this bc 2020 kept throwing issues.
+sf_use_s2(FALSE)
+```
+
+# Read in plot boundaries (from script #1)
+```{r}
+# read in plot boundary data - I'll use this to drop entire plots from the 2019 dataset, and add a plot id column to the final combined dataset
+plots <- st_read(here("data", "allPlots", "allPlots.shp")) %>% st_transform(utm14)
+```
+
+### 2016-2017 wet area
+
+Read in the 2016 and 2017 data, stored in 4 separate shapefiles. Add flyover date and veg attributes. The following is from documentation:
+      digitizedvia "an eCognition process and confirmed by the GIS intern"
+      Plot_ID - identifies a 10.36 square km area in which wetlands were surveyed.
+      Wet_Acres - identifies the wet acreage of each wetland (as digitized - yes, sorry not in metric). 
+      PW - ground-truthed observer estimate of percent of the basin that was wet. 0 = not ground-truthed
+      Veg_Height - only present in the Pair (Spring) wet area files. Was not collected during brood surveys. 
+      PE - identifies the percentage of the basin that observers on the ground estimated was covered by emergent vegetation. 
+      
+```{r, warning=F, message=F}
+pair16 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "16PairsWAFinished.shp")) %>% st_transform(utm14)
+brood16 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "16BroodsWAFinished.shp")) %>% st_transform(utm14)
+pair17 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "17PairsWAFinished.shp")) %>% st_transform(utm14)
+brood17 <- read_sf(here("data", "raw_hapet", "Digitized_Wetlands", "2014_2017", "17BroodsWAFinishedSurveyed.shp")) %>% st_transform(utm14)
+
+# read dates of aerial photography (note, not the on-the-ground data collection date)
+aerialphotos <- read_sf(here("data", "raw_hapet", "Aerial_photos", "AllPlots.shp")) %>% as.data.frame()
+
+# add aerial survey date to the 2016 and 2017 data
+# also, add the contrived plot number (created in 1.draw_1617plots.Rmd)
+pair16 <- aerialphotos %>% 
+  select(PLOT_ID, Date16_A) %>%
+  right_join(pair16, by = c('PLOT_ID'='Plot_ID')) %>%
+  st_as_sf() 
+
+brood16 <- aerialphotos %>% 
+  select(PLOT_ID, Date16_B) %>%
+  right_join(brood16, by = c('PLOT_ID'='Plot_ID')) %>%
+  st_as_sf() 
+
+pair17 <- aerialphotos %>% 
+  select(PLOT_ID, Date17_A) %>%
+  right_join(pair17, by = c('PLOT_ID'='Plot_ID')) %>%
+  st_as_sf() 
+
+brood17 <- aerialphotos %>% 
+  select(PLOT_ID, Date17_B) %>%
+  right_join(brood17, by = c('PLOT_ID'='Plot_ID')) %>%
+  st_as_sf() 
+```
+
+### 2019 wet area
+These data are stored in a single shapefile. The 2019 data has some duplicated ponds when digitizations overflow into adjacent plots. I keep the largest of overlapping ponds. Note, when HAPET publishes this 2019 publicly, they'll have QAed and fixed it themselves.
+``````{r, warning=F, message=F}
+# read in raw data
+all19_raw <- read_sf(here("data", "raw_hapet", "FWS_2018_2019", "2019_shapefiles", "2019_ALL.shp")) %>%
+  st_transform(utm14) %>%
+  st_make_valid() %>%  
+  filter(st_coordinates(st_centroid(.))[, "Y"] > 30) # some weird ones near the equator...
+
+# remove entire plots - I hand QAed these
+all19_raw <- all19_raw %>% 
+  st_join(select(plots, Plot)) %>% 
+  filter(!(Plot %in% c(346, 609, 807, 223, 218)))  %>% # these weren't actually surveyed, they're just adjacent to plots that were
+  filter(!(Plot %in% c(203)))                          # digitization of this one was too wonky
+
+# Create a helper function to get intersecting pond IDs
+get_intersecting_ids <- function(index, intersect_matrix, id_column) {
+    intersecting_ids <- id_column[intersect_matrix[[index]]]
+    intersecting_ids <- intersecting_ids[intersecting_ids != id_column[index]] # Exclude self
+    paste(intersecting_ids, collapse = ",")
+}
+
+# Use st_intersects to find intersections
+intersection_matrix <- st_intersects(all19_raw, sparse = TRUE)
+
+# Extract IDs of intersecting polygons
+all19_wint <- all19_raw %>%
+    mutate(intersecting_ids = 
+             sapply(
+                 seq_along(intersection_matrix), 
+                 get_intersecting_ids, 
+                 intersect_matrix = intersection_matrix, 
+                 id_column = all19_raw$OBJECTID))
+
+# max number of overlaps with a polygon
+max_ints <- all19_wint %>%  
+  as.data.frame() %>%
+  mutate(num_intersections = str_count(intersecting_ids, ",")) %>%
+  summarize(max(num_intersections)) %>% 
+  pull()
+
+# some ponds have multiple overlaps. Break these into separate columns
+all19_wint_sep <- all19_wint %>% 
+  separate(intersecting_ids, 
+           into = paste0('int', 1:(max_ints+1)), 
+           sep = ",") 
+
+# map of pond id <-> size
+pond_sizes <- all19_raw %>%
+  as.data.frame() %>%
+  mutate(OBJECTID = as.character(OBJECTID)) %>% 
+  select(OBJECTID, 
+         intersecting_Shape_Area = Shape_Area) 
+
+# add size of intersecting pond
+all19_wint_long <- all19_wint_sep %>%
+  filter(int1 != '') %>% 
+  mutate(id_og = OBJECTID) %>%
+  mutate(int0 = as.character(OBJECTID)) %>% 
+  select(id_og, int0, int1:int17) %>% 
+  pivot_longer(cols = c(int0, int1:int17), 
+               names_to = "int", 
+               values_to = "OBJECTID") %>%
+  filter(!is.na(OBJECTID)) %>% 
+  left_join(pond_sizes) 
+
+# identify the ponds that aren't the largest of overlaps
+temp_not_largest <- all19_wint_long %>%
+  group_by(id_og) %>% 
+  filter(intersecting_Shape_Area == max(intersecting_Shape_Area)) %>%
+  filter(id_og != OBJECTID) # these are the ones to be deleted bc theyre smaller
+
+# remove ponds that aren't the largest of overlaps
+all19 <- all19_raw %>% 
+  filter(!OBJECTID %in% temp_not_largest$id_og)
+```
+
+###  2020 wet area
+The 2020 shapefiles are stored separately, and have some geometry issues. (We're not going to use this probably - 2020 data came from Planet instead of aerial surveys bc of COVID)
+```{r, warning=F, message=F}
+
+# List all gdb files in the raw 2020 folder
+files <-  list.files(here("data", "raw_hapet", "FWS_2020", "AllWMD2020Water"), full.names = TRUE)
+
+# fn to convert multisurface features to multipolygon
+ms_to_mp <- function(geom) {
+  if (st_is(geom, "MULTISURFACE")) {
+    geom <- st_cast(geom, "MULTIPOLYGON")
+  }
+  return(geom)
+}
+
+# initialize empty list, for storing output of loop
+feat_list <- list()
+
+# loop through raw data to store imported features
+for(f in files) {
+  
+  # list layers in the gdb "f"
+  layers <- st_layers(dsn = f)
+  
+  for(l in layers$name) {
+    
+    # print loop iteration
+    print(paste(basename(f), l, sep = "_"))
+    
+    # read the layer
+    feat <- st_read(dsn = f, layer=l) %>%
+      st_transform(utm14)
+    
+    # geometry is called Shape or SHAPE. Make uniform
+    if ("SHAPE" %in% colnames(feat)) {feat <- rename(feat, Shape = SHAPE)}
+    
+    # Convert multisurface to multipolygon, if necessary
+    feat <- feat %>%
+      mutate(geometry = st_geometry(.) %>% lapply(ms_to_mp) %>% st_sfc()) %>% 
+      st_set_geometry("geometry")  %>%      # Set the new column as the geometry
+      select(-Shape) %>%                    # drop original geometry
+      st_set_crs(utm14)                     # reset crs if it got dropped during st_set_geometry
+    
+    # Ensure unique column names
+    colnames(feat) <- make.unique(colnames(feat))
+    
+    # store feature
+    feat_list[[paste(basename(f), l, sep = "_")]] <- feat
+  }
+}
+
+# combine features
+all20 <- bind_rows(feat_list)
+
+# Fix invalid geometries
+all20 <- st_make_valid(all20) %>%
+  filter(st_geometry_type(.) != "GEOMETRYCOLLECTION") 
+
+rm(feat)
+rm(feat_list)
+rm(layers)
+```
+
+### 2021-2024 wet area
+This data is solid :) 
+```{r, warning=F, message=F}
+read_21_24 <- function(filename){
+  
+  # get gdb layers
+  path <- paste0(here("data", "raw_hapet", "2021_2024", filename))
+  layers <- st_layers(path)
+  
+  # Read all layers into a list of sf objects
+  sf_list <- 
+    lapply(layers$name, function(layer) {
+      st_read(path, layer = layer) %>%
+      st_transform(utm14) %>%
+      rename(geometry=Shape)
+  })
+  
+  sf <- bind_rows(sf_list)
+}
+
+all21 <- read_21_24("WetnessNoOwner2021.gdb") %>% st_cast("MULTIPOLYGON") 
+all22 <- read_21_24("WetnessNoOwner2022.gdb") %>% st_cast("MULTIPOLYGON") 
+all23 <- read_21_24("WetnessNoOwner2023.gdb") %>% st_cast("MULTIPOLYGON") 
+all24 <- read_21_24("WetnessNoOwner2024.gdb") %>% st_cast("MULTIPOLYGON") 
+```
+
+### Combine years
+```{r}
+# combine datasets
+allPonds <- 
+  pair16 %>% 
+  select(flyover_date = Date16_A) %>% 
+  mutate(dataset = 'pair16') %>% 
+  bind_rows(brood16 %>% 
+              select(flyover_date = Date16_B, PE) %>% 
+              mutate(dataset = 'brood16')) %>% 
+  bind_rows(pair17 %>% 
+              select(flyover_date = Date17_A) %>% 
+              mutate(dataset = 'pair17')) %>% 
+  bind_rows(brood17 %>% 
+              select(flyover_date = Date17_B, PE) %>% 
+              mutate(dataset = 'brood17')) %>% 
+  bind_rows(all19 %>% 
+              select() %>% 
+              mutate(dataset = '2019')) %>% 
+  bind_rows(all20 %>% 
+              select() %>% 
+              mutate(dataset = '2020')) %>% 
+  bind_rows(all21 %>%  
+              select(flyover_date = Date, PercFull) %>% 
+              mutate(dataset = '2021')) %>%
+  bind_rows(all22 %>%  
+              select(flyover_date = Date, PercFull) %>% 
+              mutate(dataset = '2022')) %>%
+  bind_rows(all23 %>%  
+              select(flyover_date = Date, PercFull) %>% 
+              mutate(dataset = '2023')) %>%
+  bind_rows(all24 %>%  
+              select(flyover_date = Date, PercFull) %>% 
+              mutate(dataset = '2024')) %>%
+  filter(st_is_valid(geometry)) %>%                   # Filter to keep only valid geometries
+  mutate(area_m = as.numeric(st_area(geometry))) %>%  # I know most have an area already, but I redo to ensure consistency
+  filter(area_m >= 400) %>%                           # filter ponds < 20x20m
+  mutate(rownum = row_number()) %>%
+  mutate(area_acre = as.numeric(area_m*0.000247105)) 
+
+# add plot id 
+allPonds2 <- allPonds %>% st_join(select(plots, Plot)) 
+
+# ~300 ponds span multiple plots - split these ponds into 2+ by plot boundary
+dup <- allPonds2 %>% 
+  group_by(rownum) %>%
+  filter(n()>1) %>% 
+  st_intersection(select(plots, Plot)) %>% 
+  mutate(Plot=Plot.1) %>% 
+  select(-Plot.1) %>% 
+  distinct()
+
+# add these de-duplicated ponds back into the full dataset (nuke rownum and redo it)
+allPonds3 <- allPonds2 %>% 
+  group_by(rownum) %>%
+  filter(n()==1) %>%   # drop duplicated ponds
+  ungroup() %>%
+  bind_rows(dup) %>% 
+  select(-rownum) %>% 
+  mutate(rownum=row_number())
+
+# There are a handful of ponds that are somehow now point format. Just drop these.
+allPonds4 <- allPonds3 %>%
+  filter(sf::st_geometry_type(.) %in% c("POLYGON", "MULTIPOLYGON"))
+```  
+
+```{r}
+st_write(allPonds4, here("data", "allPonds", "allPond.shp"),  append=F)
+```

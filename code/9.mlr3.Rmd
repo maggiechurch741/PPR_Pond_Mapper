@@ -41,14 +41,12 @@ library(mlr3pipelines)
 ```{r, message=F}
 
 # training is 2017, 2019, 2020, 2022
-training <- read_csv('../data/balanced_training_b100.csv') %>%
+training <- read_csv('../data/modeling_inputs/balanced_training/balanced_training_2wk_b100.csv') %>%
   filter(!(red==0 & nir==0)) %>% # drop this 1 row
-  filter(!is.infinite(RBR)) %>%
-  mutate(EVI3b = 2.5*(nir-red)/(nir+(6*red)-(7.5*blue)+1),
-         EVI2b = 2.5*(nir-red)/(nir+(2.4*red)+1))
+  filter(!is.infinite(RBR)) 
   
 # testing is 2016 and 2021
-testing <- st_read('../data/intermediate/testing/testing.shp') %>% 
+testing <- read_csv('../data/modeling_inputs/testing/testing_2wk.csv') %>% 
     filter(!is.infinite(RBR))
 
 # feature set
@@ -60,10 +58,6 @@ featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
                 "AWEISH","BSI","DVW","DVI","IFW","IPVI","MIFW","OSAVI","SAVI",
                 "RVI","TVI","WRI","WTI", "VARI", "BGR", "GRR", "RBR", "SRBI", "NPCRI",
                 "EVI3b", "EVI2b")   
-
-# let's dump small 2020 ponds bc we don't trust them
-testing <- testing %>% filter(!(area_cr < 2 & dataset == "2020")| type=="dry")
-training <- training %>% filter(!(area_cr < 2 & dataset == "2020")| type=="dry")
 ```
 
 
