@@ -1,6 +1,9 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "Sample Dry Points"
+author: Maggie Church
+date: "2024-09-24"
+updated: "2025-02-24"
+output: html_document
 ---
 
 **Description**: Limit the Possibility Layer to known dry areas (not wet in HAPET, and not a permanent water body). We will randomly sample dry points from within this area, to train the model what is dry.

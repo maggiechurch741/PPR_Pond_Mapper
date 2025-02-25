@@ -1,8 +1,11 @@
 ---
-title: "sample_gtwpred_data"
-output: pdf_document
+title: "Determine Train/Test Split"
+author: Maggie Church
 date: "2024-08-16"
+updated: "2025-02-24"
+output: html_document
 ---
+This script splits dry and wet data points into training and testing. 
 
 ```{r}
 library(dplyr)
@@ -14,8 +17,6 @@ set.seed(123)
 source(here("code", "helper_functions", "VIs.R"))
 ```
 
-
-This script splits dry and wet data points (from scripts #5 and #6) into training and testing. 
 
 # read in GT points (2-wk composites)
 Wrangling steps: 
@@ -106,8 +107,8 @@ For the 4wk data, we had valid pixels for
 100% of 2023
 99% of 2024
 
-```{r}
-# don't drop band values between -1 to 1, for this (I drop them in the chunk above)
+```{r, eval=F, echo=F}
+# Calculate number of valid pixels (make sure you comment out the step in the chunk above where I filter values -1 to 1)
 all_samples %>% 
   st_drop_geometry() %>%
   group_by(dataset) %>% 
@@ -176,9 +177,6 @@ test_plot_ids17 <- all_samples %>%
 # combine sampled plots
 test_plot_ids <- c(test_plot_ids21_24, test_plot_ids17)
 ```
-
-Alternatively, hand-pick 5 per L3mod: 
-test_plot_ids <- c(954, 992, 504, 182, 391, 629, 369, 48, 197, 29, 768, 282, 209, 37, 59, 316, 265, 765, 217, 271, 284, 760, 832, 830, 246)
 
 # Export training and testing
 ```{r}

@@ -2,14 +2,9 @@
 title: "Model Development"
 author: "Maggie Church"
 date: "October 12, 2024"
+updated: "2025-02-24"
 output: html_document
-editor_options: 
-  chunk_output_type: inline
-  markdown: 
-    wrap: 72
 ---
-
-This is a script for creating models from processed tidy data
 
 Steps: 1. Load libraries 2. Load data 3. Split data into training and
 testing sets 4. Tune the model on the inner training set 5. Build model
@@ -17,8 +12,7 @@ on the outer training data; save model for future use 6. Predict model
 on outer testing data for final model evaluation 7. Predict novel pixels
 using site-level data
 
-1.  Load libraries
-
+# 1.  Load libraries
 ```{r, message=F}
 # install.packages("Ckmeans.1d.dp")
 # install.packages("tidyterra")
@@ -34,19 +28,17 @@ library(mlr3tuningspaces)   # suggested hyperparameter tuning spaces
 library(parallelly)
 library(future)
 library(mlr3pipelines)
+library(here)
 ```
 
-2.  Load data
-
+# 2.  Load data
 ```{r, message=F}
-
-# training is 2017, 2019, 2020, 2022
-training <- read_csv('../data/modeling_inputs/balanced_training/balanced_training_2wk_b100.csv') %>%
-  filter(!(red==0 & nir==0)) %>% # drop this 1 row
+# training is 2017, 2021-2024
+training <- read_csv(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.csv")) %>%
   filter(!is.infinite(RBR)) 
   
-# testing is 2016 and 2021
-testing <- read_csv('../data/modeling_inputs/testing/testing_2wk.csv') %>% 
+# testing is 2016 and 2019 + out-of-space plots
+testing <- read_csv(here("data", "train_test_data", "testing", "testing_2wk.csv")) %>% 
     filter(!is.infinite(RBR))
 
 # feature set
@@ -61,40 +53,7 @@ featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
 ```
 
 
-3. Create CV folds, using k-means coordinate clustering
-
-```{r}
-set.seed(123)
-
-# Function to apply kmeans to each group
-apply_kmeans_per_group <- function(group_data) {
-  
-  # Extract coordinates
-  coords <- st_coordinates(group_data)
-  
-  # Apply kmeans clustering
-  kmeans_result <- kmeans(coords, centers = 5, algorithm = "Lloyd", iter.max = 60)
-
-  # Add the cluster assignments back to the data
-  group_data <- group_data %>% mutate(clusterid = kmeans_result$cluster)
-  
-  return(group_data)
-}
-
-# Apply kmeans clustering to each group within 'training' grouped by 'dataset'
-clustered_training <- training %>%
-  group_by(dataset) %>%
-  group_modify(~ apply_kmeans_per_group(.x)) %>%
-  ungroup() %>% 
-  # Actually I want 2017 to be its own, single cluster
-  mutate(clusterid = ifelse(dataset %in% c("pair17", "brood17"), 1, clusterid)) 
-
-# add "block" var, to get cluster-dataset blocks. We'll use these as CV folds
-dat <- clustered_training %>% 
-  mutate(block = as.factor(paste(clusterid, dataset))) 
-```
-
-## Feature Selection
+# 3. Feature Selection
 
 fsi: Optimizes feature subset for the learner. All feature subsets are
 evaluated on the same data splits.
@@ -164,7 +123,7 @@ fselector$optimize(instance)
 plan("sequential")
 ```
 
-Assess feature selection
+## Assess feature selection
 ```{r}
 # get the RFE archive
 rfe_archive = as.data.table(instance$archive)[!is.na(iteration), ]
@@ -198,7 +157,7 @@ rfe_summary = rfe_archive %>%
 
 ```
 
-# Hyperparameter Tuning
+# 4. Hyperparameter Tuning
 ```{r}
 set.seed(123)
 

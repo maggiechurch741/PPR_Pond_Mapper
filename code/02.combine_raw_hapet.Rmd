@@ -309,8 +309,12 @@ allPonds3 <- allPonds2 %>%
 # There are a handful of ponds that are somehow now point format. Just drop these.
 allPonds4 <- allPonds3 %>%
   filter(sf::st_geometry_type(.) %in% c("POLYGON", "MULTIPOLYGON"))
+
+# oh and drop 2019 "overflowing" data
+allPonds5 <- allPonds4 %>% 
+  filter(!(is.na(Plot) & dataset=="2019"))
 ```  
 
 ```{r}
-st_write(allPonds4, here("data", "allPonds", "allPond.shp"),  append=F)
+st_write(allPonds5, here("data", "allPonds", "allPond.shp"),  append=F)
 ```

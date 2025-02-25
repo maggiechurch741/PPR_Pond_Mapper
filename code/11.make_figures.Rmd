@@ -1,39 +1,42 @@
 ---
-title: "figures_exploratory"
-output: pdf_document
+title: "Explore data + make figures"
+author: "Maggie Church"
 date: "2024-08-16"
+updated: "2025-02-24"
+output: html_document
 ---
 
 This script simply explores the predictors of training and testing data. Each chunk creates a different figure.
 
 ```{r}
-library(dplyr)
-library(readr)
-library(tidyr)
+library(tidyverse)
 library(sf)
-library(ggplot2)
 library(mapview)
 library(shapr)
 library(ggfortify)
 library(gridExtra)
 library(corrplot)
+library(here)
 
 set.seed(123)
 ```
 
 
-# Load training/testing data
+# Load training/testing data and boundary datasets
 ```{r}
 # get state boundaries
-states <- st_read('./../../states/cb_2016_us_state_5m.shp') %>%
+states <- st_read(here("data", "boundaries", "states")) %>%
   st_transform(4326) %>% 
   dplyr::select(STATEFP, STUSPS)
 
 # get PPR boundary, for figures
-ppr <- st_read("./../../ppr_boundary/PPJV/PPJV.shp") %>% st_transform(4326)
+ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(4326)
+
+# get PPR plots
+plots <- st_read(here("data", "allPlots")) %>% st_transform(4326)
 
 # training is 2017 and 2019 data (minus SD) (450 per state/year)
-training <- st_read('../data/intermediate/balanced_training/balanced_training.shp') %>%
+training <- st_read(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.shp")) %>%
   mutate(type2 = case_when(
     area_cr < 2 ~ 'small (< 2 acre)',
     area_cr >= 2 ~ 'large (>= 2 acre)',
@@ -41,7 +44,7 @@ training <- st_read('../data/intermediate/balanced_training/balanced_training.sh
   )) 
 
 # testing is 2016 data and 2019 SD (450 per state/year)
-testing <- st_read('./../data/intermediate/testing/testing.shp') %>%
+testing <- st_read(here("data", "train_test_data", "testing", "testing_2wk.shp")) %>%
   mutate(type2 = case_when(
     area_cr < 2 ~ 'small (< 2 acre)',
     area_cr >= 2 ~ 'large (>= 2 acre)',
@@ -51,16 +54,65 @@ testing <- st_read('./../data/intermediate/testing/testing.shp') %>%
 featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI","spei30d_2","red","spei30d_1","nir","water30_10","VVVH_ratio","water90_10","green","z_2","NDWI","z_1","ABWI","hand90_100","VH","TCB","NDMI1","blue","hand30_100","mNDWI2","mNDWI1","TCG","red_edge_1","z","red_edge_2","red_edge_3","NDPI","BU3","AWEI","AWEISH","BSI","DVW","DVI","IFW","IPVI","MIFW","OSAVI","SAVI","RVI","TVI","WRI","WTI")  
 ```
 
+Get modified ecoregion boundaries
+```{r}
+# load ecoregion boundaries
+ecoregion5 <- st_read(here("data", "boundaries", "reg5_eco_l3")) %>% st_transform(4326)
+ecoregion7 <- st_read(here("data", "boundaries", "reg7_eco_l3")) %>% st_transform(4326)
+ecoregion8 <- st_read(here("data", "boundaries", "reg8_eco_l3")) %>% st_transform(4326)
+
+# combine ecoregion layers
+ecoregions <- bind_rows(ecoregion5, ecoregion7, ecoregion8) %>% 
+  select(NA_L3NAME, NA_L2NAME)
+
+# get the ecoregions within the ppr
+ppr_ecoregions <- st_intersection(ecoregions, ppr)
+
+# modify ecoregion category, to consolidate (a region gets subsumed if <5 plots in it)
+ppr_ecoregions_mod <- ppr_ecoregions %>% 
+  mutate(L3mod = case_when(
+    NA_L3NAME %in% c("Northwestern Great Plains", "Middle Rockies", "Canadian Rockies", "Northwestern Glaciated Plains") ~ "Northwestern Plains",
+    NA_L3NAME %in% c("North Central Hardwood Forests", "Northern Lakes and Forests") ~ "Northern Forests",
+    NA_L3NAME %in% c("Lake Manitoba and Lake Agassiz Plain", "Northern Minnesota Wetlands") ~ "Lake Agassiz Plain",
+    NA_L3NAME %in% c("Western Corn Belt Plains", "Driftless Area") ~ "Western Corn Belt Plains",
+    T ~ NA_L3NAME
+  )) %>% 
+  group_by(L3mod) %>% 
+  summarize(geometry = st_as_sf(st_union(geometry)))
+
+rm(ppr_ecoregions, ecoregions, ecoregion5, ecoregion7, ecoregion8)
+```
+
+# Train vs Test data
+```{r}
+test_years <- c("pair16", "brood16", "2019")
+
+test_plots <- testing %>% 
+  st_drop_geometry() %>%
+  filter(!(dataset %in% test_years)) %>% 
+  distinct(plot_id) %>% 
+  pull() 
+
+train_plots <- training %>% 
+  st_drop_geometry() %>%
+  distinct(plot_id) %>% 
+  pull() 
+
+mapview(plots %>% filter(Plot %in% test_plots), alpha = 1, col.regions="blue", color="blue", lwd=3, legend=F) + 
+  mapview(plots %>% filter(Plot %in% train_plots), alpha = 1, col.regions="orange", color="orange", lwd=3, legend=F) + 
+  mapview(ppr, alpha.regions = 0, lwd=2, legend=F) +
+  mapview(ppr_ecoregions_mod, alpha.regions = 0, lwd=1, legend=F)
+```
 
 # Spectral Signature
 Notice the brood data looks different. And reflectance is generally higher in MT. 
 ```{r}
-source("~/Documents/CSU/PPR/analysis/analysis_9.19.24/code/plotss.R")
+source(here("code", "helper_functions", "plotss.R"))
 
 training %>% 
   st_drop_geometry() %>% 
   plotss(grouping_var = type, 
-         CI=F,
+         CI=,
          band_cindices = c(24, 15, 8, 27, 29, 30, 10, 2, 4),
          subtitle="",
          title="SD")
