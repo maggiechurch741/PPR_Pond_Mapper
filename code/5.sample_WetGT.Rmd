@@ -25,7 +25,7 @@ allPonds <- st_read(here("data", "intermediate", "buffered_ponds", "allPonds_inb
 ```
 
 # Sample wet points
-Sample wet GT points: 100 wet points from each plot (and at least 1 point per pond)
+Sample wet GT points: 200 wet points from each plot (and at least 1 point per pond)
 
 ```{r}
 library(sf)
@@ -44,12 +44,12 @@ sample_points <- function(geometry, n) {
 sample_points_per_plot <- function(plot_polygons) {
   n_polygons <- nrow(plot_polygons)
   
-  if (n_polygons >= 100) {
-    # If 100+ polygons, sample one point per polygon
+  if (n_polygons >= 200) {
+    # If 200+ polygons, sample one point per polygon
     sampled_points <- map_dfr(plot_polygons$geometry, ~ sample_points(.x, 1))
   } else {
-    # If fewer than 100 polygons, distribute extra points
-    extra_points_needed <- 100 - n_polygons
+    # If fewer than 200 polygons, distribute extra points
+    extra_points_needed <- 200 - n_polygons
     points_per_polygon <- rep(1, n_polygons)
     
     if (extra_points_needed > 0) {
