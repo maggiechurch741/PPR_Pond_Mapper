@@ -8,12 +8,17 @@ output: html_document
 This script splits dry and wet data points into training and testing. 
 
 ```{r}
+# Load libraries
 library(dplyr)
 library(readr)
 library(sf)
 library(purrr)
+library(here)
 
+# Set random seed
 set.seed(123)
+
+# Load custom functions
 source(here("code", "helper_functions", "VIs.R"))
 ```
 
@@ -27,8 +32,6 @@ Wrangling steps:
 - get 1 nonnull plot_id col (drops some points, mostly dubious dry ones)
 - equalize wet and dry points within a plot-survey 
 ```{r}
-set.seed(1)
-
 # Define the folder path where shapefiles are located
 folder_path <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk")
 
@@ -85,36 +88,6 @@ all_samples <- all_samples %>%
   })
 ```
 
-For the 2wk data, we had valid pixels for 
-40% of May 2016
-46% of Aug 2016
-90% of May 2017
-22% of Aug 2017
-69% of 2019
-84% of 2021
-92% of 2022
-99% of 2023
-92% of 2024
-
-For the 4wk data, we had valid pixels for
-67% of May 2016
-95% of Aug 2016
-100% of May 2017
-90% of Aug 2017
-90% of 2019
-98% of 2021
-99% of 2022
-100% of 2023
-99% of 2024
-
-```{r, eval=F, echo=F}
-# Calculate number of valid pixels (make sure you comment out the step in the chunk above where I filter values -1 to 1)
-all_samples %>% 
-  st_drop_geometry() %>%
-  group_by(dataset) %>% 
-  summarize(prop_valid = paste0(100-round(sum(red==-99990000 | red==-9999)/n()*100), "%"))
-```
-
 # Add modified Level-III ecoregion
 ```{r}
 # load ecoregion boundaries
@@ -151,8 +124,6 @@ all_samples <- all_samples %>% st_join(ppr_ecoregions2)
 I'll test on test on 2016 (wet) and 2019 (dry)
 Randomly select plots for out-of-space testing set: 10% of plots within each ecoregion
 ```{r}
-set.seed(1)
-
 testyrs <- c("pair16", "brood16", "2019")
 ndyrs <- c("pair17", "brood17")
 
@@ -176,10 +147,7 @@ test_plot_ids17 <- all_samples %>%
 
 # combine sampled plots
 test_plot_ids <- c(test_plot_ids21_24, test_plot_ids17)
-```
 
-# Export training and testing
-```{r}
 # get test from novel areas and years
 testing <- all_samples %>% 
   filter(dataset %in% testyrs | plot_id %in% test_plot_ids) %>%
@@ -189,7 +157,10 @@ testing <- all_samples %>%
 training <- all_samples %>% 
   filter(!(dataset %in% testyrs | plot_id %in% test_plot_ids)) %>% 
   distinct()
+```
 
+# Export data
+```{r}
 st_write(training, here("data", "train_test_data", "unbalanced_training", "training_2wk.shp"), append=F)
 st_write(testing,  here("data", "train_test_data", "testing", "testing_2wk.shp"), append=F)
 write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk.csv"))
