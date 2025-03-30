@@ -15,22 +15,24 @@ library(here)
 
 utm14 <- 32614
 wgs <- 4326
+
+source(here("code", "helper_functions", "cycle_sample.R"))
 ```
 
 # Read data
 Read in preprocessed, combined, and in-buffered HAPET data. Buffer allows 10-m pixels to be mostly wet. 
 ```{r}
 # Load in-buffered HAPET data
-allPonds <- st_read(here("data", "intermediate", "buffered_ponds", "allPonds_inbuff75.shp")) 
+allPonds_inbuff75 <- st_read(here("data", "intermediate", "buffered_ponds", "allPonds_inbuff75.shp")) 
 ```
 
-# Sample wet points
-Sample 1 point from each pond
-
+Sample 1 point per pond
+Cycle through sampling if necessary to reach 200 points 
+(points can be selected multiple times)
 ```{r}
 set.seed(123)
 
-# Function to sample 1 point from each pond
+# Sample 1 point per pond with error handling
 safe_sample <- function(geometry) {
   tryCatch({
     sampled_point <- st_sample(geometry, 1, force = TRUE)
@@ -44,24 +46,56 @@ safe_sample <- function(geometry) {
   })
 }
 
-# Sample points with error handling
- wetPoints <- allPonds_inbuff75 %>%
-   mutate(sample_point = map(geometry, safe_sample)) %>%
-   filter(!map_lgl(sample_point, ~ all(is.na(.x))))  
+# Function to sample 200 more points without replacement
+cycle_sample <- function(grouped_sf, n) {
+  
+  # Step 1: Sample 1 point per pond
+  sampled_points <- grouped_sf %>%
+    mutate(sample_point = map(geometry, safe_sample)) %>%
+    filter(!map_lgl(sample_point, ~ all(is.na(.x))))  # Remove NAs
+  
+  n_ponds <- nrow(sampled_points)
+  
+    # Step 2: If fewer than `n` ponds, re-sample (without replacement) from existing ponds to get additional points
+    if (n_ponds < n) {
+      
+      remaining_needed <- n - n_ponds
+      
+      # Resample new points from existing ponds without repeating previous samples
+      extra_samples <- grouped_sf %>%
+        slice(rep(1:n_ponds, length.out = remaining_needed)) %>%
+        mutate(sample_point = map(geometry, safe_sample)) 
+      
+      # Remove NAs from new samples
+      extra_samples <- extra_samples %>%
+        filter(!map_lgl(sample_point, ~ all(is.na(.x))))
+      
+      # Combine initial and additional samples
+      sampled_points <- bind_rows(sampled_points, extra_samples)
+    }
 
-# Change the geometry from pond polygons to sample points
- wetPoints_sf <- st_as_sf(
+    return(sampled_points)
+  }
+
+# Apply the sampling function to all plots
+wetPoints <- allPonds_inbuff75 %>%
+  group_by(Plot, dataset) %>%
+  group_modify(~ cycle_sample(.x, n=200)) %>%
+  ungroup() 
+
+wetPoints_sf <- st_as_sf(
   data.frame(
-    geometry = do.call(c, wetPoints$sample_point),
-    st_drop_geometry(wetPoints)
-  ) %>% select(-sample_point)
- ) %>% st_set_crs(utm14)
+    geometry = do.call(c, wetPoints$sample_point),  
+    st_drop_geometry(wetPoints) 
+  ) %>% select(-sample_point) 
+) %>% st_set_crs(utm14) %>% 
+  distinct() 
 ```
 
 # Export wet points
 ```{r}
 # Get state info
-states <- st_read("data", "boundaries", "states") %>%
+states <- st_read(here("data", "boundaries", "states")) %>%
   st_transform(utm14) %>% 
   select(STATEFP, STUSPS)
 
@@ -70,9 +104,7 @@ wetPoints_sf_wstate <- wetPoints_sf %>%
   st_join(states) %>%  # add state info
   st_transform(wgs)    # set to WGS before exporting
 
-st_write(wetPoints_sf_wstate, here("data", "intermediate", "sampled_coordinates", "wet.shp", append=FALSE))
+st_write(wetPoints_sf_wstate, here("data", "intermediate", "sampled_coordinates", "wet_200.shp"), append=FALSE)
 ```
 
-Next, I upload the exported wet points to GEE to extract their predictors, then save those results at PPR/samplePoints/data/inputs.
-
-Code for further analysis is found at `PPR/samplePoints/code`.
+Next, I upload the exported wet points to GEE to extract their predictors
