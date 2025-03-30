@@ -1,53 +1,63 @@
 ---
-title: "Determine Train/Test Split"
+  title: "Determine Train/Test Split"
 author: Maggie Church
 date: "2024-08-16"
 updated: "2025-02-24"
 output: html_document
 ---
-This script splits dry and wet data points into training and testing. 
+  This script splits dry and wet data points into training and testing. 
 
 ```{r}
-# Load libraries
+train_yrs_fullppr <- c("2019", "2021", "2023")
+testyrs <- c("brood16", "2022", "2024")
+nd_trainyrs <- c("pair16", "pair17", "brood17")
+```
+
+```{r}
 library(dplyr)
 library(readr)
 library(sf)
 library(purrr)
 library(here)
 
-# Set random seed
-set.seed(123)
-
-# Load custom functions
 source(here("code", "helper_functions", "VIs.R"))
 ```
 
-
 # read in GT points (2-wk composites)
 Wrangling steps: 
-- rescale S2 L1C values
+  - rescale S2 L1C values
 - drop values outside of -1 to 1
 - convert flyvr_d to date
 - calculate VIs
 - get 1 nonnull plot_id col (drops some points, mostly dubious dry ones)
-- equalize wet and dry points within a plot-survey 
+
+4wk - 200 wet points: raw nrow = 1,246,888
+2wk - 200 wet points: raw nrow = 1,093,110
+4wk - 1 point per pond: raw nrow = 
+2wk - 1 point per pond: raw nrow = 
+
 ```{r}
+set.seed(1)
+
 # Define the folder path where shapefiles are located
-folder_path <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk")
+folder_path_wet <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-4wk", "wet_4wk_200")
+folder_path_dry <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-4wk", "dry_4wk")
 
 # List all .shp files in the folder (ensure full path is returned)
-shp_files <- list.files(path = folder_path, pattern = "\\.shp$", full.names = TRUE)
+shp_files_wet <- list.files(path = folder_path_wet, pattern = "\\.shp$", full.names = TRUE)
+shp_files_dry <- list.files(path = folder_path_dry, pattern = "\\.shp$", full.names = TRUE)
+shp_files <- c(shp_files_wet, shp_files_dry)
 
 # Read each shapefile into a list of sf objects
 shapefiles_list <- lapply(shp_files, function(file) {
   
-    print(file)
-
-    st_read(file, quiet = TRUE) %>%
+  print(file)
+  
+  st_read(file, quiet = TRUE) %>%
     mutate(type = ifelse(grepl("wet", basename(file)), "wet", "dry")) %>% 
     st_set_crs(4326) %>% 
     return()
- })
+})
 
 band_cols <- c("blue", "green", "red", "red_edge_1", "red_edge_2", "red_edge_3", "nir", "swir1", "swir2")
 
@@ -59,33 +69,53 @@ all_samples <- do.call(bind_rows, shapefiles_list) %>%
                 ~ if_else(dataset %in% c("pair16", "brood16", "pair17", "brood17"), .x * 10000, .x))) %>%
   # drop values outside of -1 to 1
   filter(!if_any(all_of(band_cols), ~ .x < -1 | .x > 1)) %>% 
+  # drop this 1 row
+  filter(!(red==0 & nir==0)) %>% 
   # convert flyvr_d to date
   mutate(flyvr_d = as.Date(as.POSIXct(flyvr_d / 1000, origin = "1970-01-01", tz = "UTC"))) %>% 
-  # use 1 col for plot_id
-  mutate(plot_id = if_else(!is.na(plot_id), plot_id, Plot)) %>% 
+  # keep only 1 plotid col
+  mutate(plot_id = if_else(is.na(plot_id), Plot, plot_id)) %>% 
   select(-Plot) %>% 
   # Calculate VIs
-  moreVIs()
+  moreVIs() %>% 
+  # drop rows with infinite values
+  filter(!if_any(-geometry, is.infinite)) %>%
+  # drop this too 
+  filter(!is.na(NDRE)) 
 
-# A bunch of wet points lost "plot_id" at some point... Get these back. 
-# I wonder if some of the dry sampling occurred outside of the designated area, bc there are lots of dry points outside of plots. Drop these. 
-plots <- st_read(here("data", "allPlots")) 
-all_samples <- all_samples %>%
-  st_join(select(plots, Plot)) %>% 
-  filter(!is.na(Plot)) %>% 
-  mutate(plot_id = if_else(!is.na(plot_id), plot_id, Plot)) 
+# Some wet sampling occured outside of plot boundaries. Drop these. 
+all_samples <- all_samples %>% filter(!is.na(plot_id)) 
+```
 
-# Equalize wet and dry points within a plot-survey 
-# there are 21 plot-surveys where I didn't draw enough dry samples to match wet samples, and there are < 100
-all_samples <- all_samples %>%
-  group_split(dataset, plot_id) %>%  # Split into list by dataset-plot
-  map_dfr(~ {
-    n_wet <- sum(.x$type == "wet")  # Count wet points in this plot
-    sampled_dry <- .x %>%
-      filter(type == "dry") %>%
-      sample_n(size = min(n(), n_wet), replace = FALSE)  # Sample dry points
-    bind_rows(filter(.x, type == "wet"), sampled_dry)  # Combine with all wet points
-  })
+
+For the 2wk data, we had valid pixels for 
+40% of May 2016
+46% of Aug 2016
+90% of May 2017
+22% of Aug 2017
+69% of 2019
+84% of 2021
+92% of 2022
+99% of 2023
+92% of 2024
+
+For the 4wk data, we had valid pixels for
+67% of May 2016
+95% of Aug 2016
+100% of May 2017
+90% of Aug 2017
+90% of 2019
+98% of 2021
+99% of 2022
+100% of 2023
+99% of 2024
+
+```{r, eval=F, echo=F}
+# Calculate number of valid pixels (make sure you comment out the step in the chunk above where I filter values -1 to 1)
+all_samples %>% 
+  st_drop_geometry() %>%
+  group_by(dataset) %>% 
+  summarize(prop_valid = paste0(100-round(sum(red==-99990000 | red==-9999)/n()*100), "%"))
 ```
 
 # Add modified Level-III ecoregion
@@ -120,48 +150,111 @@ ppr_ecoregions2 <- ppr_ecoregions %>%
 all_samples <- all_samples %>% st_join(ppr_ecoregions2) 
 ```
 
+```{r}
+# (re)equalize wet and dry points within a plot-survey 
+all_samples <- all_samples%>%
+  group_split(dataset, plot_id) %>%  # Split into list by dataset-plot
+  map_dfr(~ {
+    n_wet <- sum(.x$type == "wet")  # Count wet points in this plot
+    sampled_dry <- .x %>%
+      filter(type == "dry") %>%
+      sample_n(size = min(n(), n_wet), replace = FALSE)  # Sample dry points
+    bind_rows(filter(.x, type == "wet"), sampled_dry)  # Combine with all wet points
+  })
+```
+
 # Determine testing set
 I'll test on test on 2016 (wet) and 2019 (dry)
 Randomly select plots for out-of-space testing set: 10% of plots within each ecoregion
 ```{r}
-testyrs <- c("pair16", "brood16", "2019")
-ndyrs <- c("pair17", "brood17")
+set.seed(1)
 
-# sample 10% of plots from each L3mod, for 2021-2024
-test_plot_ids21_24 <- all_samples %>% 
+# sample 10% of plots from each L3mod, for full-region years 
+test_plot_ids_fullyrs <- all_samples %>% 
   st_drop_geometry() %>% 
-  filter(type=="wet" & !(dataset %in% testyrs) & !(dataset %in% ndyrs)) %>% 
+  # limit to wet points
+  filter(type=="wet") %>%
+  # limit to full-year training sets
+  filter(!(dataset %in% testyrs) & !(dataset %in% nd_trainyrs)) %>% 
+  # limit to surveys with at least 5 ponds
+  group_by(plot_id, dataset) %>% 
+  filter(n() > 5) %>% 
+  ungroup() %>% 
+  # sample 10% of plots from each ecoregion
   distinct(plot_id, L3mod) %>% 
   group_by(L3mod) %>% 
   sample_frac(0.1) %>% 
   distinct(plot_id) %>% 
   pull(plot_id) 
 
-# sample 10% of plots for 2017
-test_plot_ids17 <- all_samples %>% 
+# sample 10% of plots for ND-only years
+test_plot_ids_ndyrs <- all_samples %>% 
   st_drop_geometry() %>% 
-  filter(type=="wet" & dataset %in% ndyrs) %>% 
+  # limit to wet points
+  filter(type=="wet") %>%
+  # limit to nd-only training sets
+  filter(dataset %in% nd_trainyrs) %>% 
+  # limit to surveys with at least 5 ponds
+  group_by(plot_id, dataset) %>% 
+  filter(n() > 5) %>% 
+  ungroup() %>% 
+  # sample 10% of plots
   distinct(plot_id) %>% 
   sample_frac(0.1) %>% 
   pull(plot_id) 
 
 # combine sampled plots
-test_plot_ids <- c(test_plot_ids21_24, test_plot_ids17)
-
-# get test from novel areas and years
-testing <- all_samples %>% 
-  filter(dataset %in% testyrs | plot_id %in% test_plot_ids) %>%
-  distinct()
- 
-# get train data
-training <- all_samples %>% 
-  filter(!(dataset %in% testyrs | plot_id %in% test_plot_ids)) %>% 
-  distinct()
+test_plot_ids <- c(test_plot_ids_fullyrs, test_plot_ids_ndyrs)
 ```
 
-# Export data
+I want to compare a few methods (2 vs 4 wk, 200pt vs 1pt per pond)
+and I want to make sure I'm comparing against the same test set.
+So save this test set!
 ```{r}
-st_write(training, here("data", "train_test_data", "unbalanced_training", "training_2wk.shp"), append=F)
-st_write(testing,  here("data", "train_test_data", "testing", "testing_2wk.shp"), append=F)
-write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk.csv"))
+write(test_plot_ids, here("data", "train_test_data", "test_plot_ids.txt"))
+```
+
+Read in test plot ids
+```{r}
+test_plot_ids <- scan(here("data", "train_test_data", "test_plot_ids.txt"))
+```
+
+```{r}
+# get test from novel areas and years
+testing <- all_samples %>% 
+  filter(dataset %in% testyrs | plot_id %in% test_plot_ids) 
+
+# get train data
+training <- all_samples %>% 
+  filter(!(dataset %in% testyrs | plot_id %in% test_plot_ids)) 
+```
+
+```{r}
+set.seed(1)
+
+# Function to perform k-means on each dataset's coordinates
+perform_kmeans <- function(data) {
+  coords <- sf::st_coordinates(data)  
+  kmeans_result <- kmeans(coords, centers = 2, algorithm = "Lloyd", iter.max = 60)
+  data$cluster_id <- kmeans_result$cluster
+  return(data)  
+}
+
+# Split by dataset and apply kmeans to each group 
+training <- training %>%
+  filter(dataset %in% train_yrs_fullppr) %>%
+  group_split(dataset) %>%
+  lapply(perform_kmeans) %>% 
+  bind_rows() %>% 
+  bind_rows(training %>% filter(!dataset %in% train_yrs_fullppr) %>% mutate(cluster_id=1)) %>% 
+  ungroup() %>% 
+  mutate(block = paste(cluster_id, "-", dataset)) 
+```
+
+# Export training and testing
+```{r}
+st_write(training, here("data", "train_test_data", "unbalanced_training", "training_4wk_200pt.shp"), append=F)
+write_csv(training, here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.csv"), append=F)
+st_write(testing,  here("data", "train_test_data", "testing", "testing_4wk_200pt.shp"), append=F)
+write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk_200pt.csv"))
 ```
