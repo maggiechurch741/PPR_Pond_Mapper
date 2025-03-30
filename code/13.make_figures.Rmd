@@ -85,21 +85,8 @@ rm(ppr_ecoregions, ecoregions, ecoregion5, ecoregion7, ecoregion8)
 
 # Train vs Test data
 ```{r}
-test_years <- c("pair16", "brood16", "2019")
-
-test_plots <- testing %>% 
-  st_drop_geometry() %>%
-  filter(!(dataset %in% test_years)) %>% 
-  distinct(plot_id) %>% 
-  pull() 
-
-train_plots <- training %>% 
-  st_drop_geometry() %>%
-  distinct(plot_id) %>% 
-  pull() 
-
 mapview(plots %>% filter(Plot %in% test_plots), alpha = 1, col.regions="blue", color="blue", lwd=3, legend=F) + 
-  mapview(plots %>% filter(Plot %in% train_plots), alpha = 1, col.regions="orange", color="orange", lwd=3, legend=F) + 
+  mapview(plots %>% filter(!(Plot %in% test_plots)), alpha = 1, col.regions="orange", color="orange", lwd=3, legend=F) + 
   mapview(ppr, alpha.regions = 0, lwd=2, legend=F) +
   mapview(ppr_ecoregions_mod, alpha.regions = 0, lwd=1, legend=F)
 ```

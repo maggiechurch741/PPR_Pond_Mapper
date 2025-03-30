@@ -1,0 +1,310 @@
+---
+title: "Proposal Ch 2 Figures"
+output: html_document
+date: "2025-03-25"
+---
+```{r}
+library(tidyverse)
+library(sf)
+library(here)
+```
+
+```{r}
+set.seed(1)
+
+# read in data
+plots <- st_read(here("data", "allPlots")) %>% st_transform(4326) %>% 
+  filter(!(Plot %in% c(914, 945))) # these are just a bit outside of the PPR
+ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(4326)
+ponds <- st_read(here("data", "allPonds_wgs"))
+#ponds <- st_read(here("data", "intermediate", "buffered_ponds", "allPonds_inbuff75.shp")) 
+l3mod <- st_read(here("data", "boundaries", "l3mod"))
+states <- st_read(here("data", "boundaries", "states")) %>% st_transform(4326)
+```
+
+Figure 1: train/test splits at different levels of spatial aggregation
+```{r}
+# random 30-70 split
+test_ponds_random <- ponds %>% 
+  filter(dataset == "2022" & Plot == 1) %>% 
+  sample_frac(0.3) %>% 
+  st_centroid() 
+
+train_ponds_random <- ponds %>% 
+  filter(dataset == "2022" & Plot == 1) %>% 
+  slice(setdiff(1:n(), which(rownames(ponds) %in% rownames(test_ponds_random)))) %>% 
+  st_centroid()
+
+ggplot() +
+  geom_sf(data = train_ponds_random, color="#0072B2", size=2) + 
+  geom_sf(data = test_ponds_random, color="#D27D1C", size=2) +
+  geom_sf(data = filter(plots, Plot==1), color="black", alpha=0) +
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1)  
+  )
+
+################################
+
+# sample 30% of plots from each L3mod, for full-region years 
+test_plots <- plots %>% 
+  st_join(l3mod) %>% 
+  group_by(L3mod) %>% 
+  sample_frac(0.3) %>% 
+  distinct(Plot) %>% 
+  pull(Plot) 
+  
+ggplot() +
+  geom_sf(data=filter(plots, !(Plot %in% test_plots)), color="#0072B2", linewidth=1.5) + 
+  geom_sf(data=filter(plots, Plot %in% test_plots), color="#D27D1C", linewidth=1.5) +
+  geom_sf(data=ppr, color="black", alpha=0) +
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),          
+    axis.text.x = element_text(angle = 45, hjust = 1) 
+  )
+
+################################
+
+# sample by clusters of plots
+
+# Function to perform k-means on each dataset's coordinates
+perform_kmeans <- function(data) {
+  coords <- sf::st_coordinates(data)  
+  kmeans_result <- kmeans(coords, centers = 2, algorithm = "Lloyd", iter.max = 60)
+  data$cluster_id <- kmeans_result$cluster
+  return(data)  
+}
+
+# Split by dataset and apply kmeans to each group 
+coords <- plots %>% 
+  st_centroid(plots) %>% 
+  st_coordinates(plots) 
+
+kmeans_result <- kmeans(coords, centers = 70, algorithm = "Lloyd", iter.max = 60)
+
+plots$cluster_id <- kmeans_result$cluster
+
+set.seed(3)
+test_plots_clusters <- plots %>% 
+  distinct(cluster_id) %>% 
+  sample_frac(0.3) %>% 
+  pull(cluster_id)
+
+ggplot() +
+  geom_sf(data=filter(plots, !(cluster_id %in% test_plots_clusters)),
+          color="#0072B2", linewidth=1.5) + 
+  geom_sf(data=filter(plots, cluster_id %in% test_plots_clusters), 
+          color="#D27D1C", linewidth=1.5) +
+  geom_sf(data=ppr, color="black", alpha=0) +
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "none"  
+  )
+
+test_plots <- plots %>% filter(cluster_id %in% test_plots_clusters)
+nrow(test_plots)/nrow(plots)
+
+################################
+
+# sample by state
+plots_states <- plots %>% 
+  st_join(states) %>% 
+  mutate(test_state = if_else(STUSPS == "SD", 1, 0))
+
+ggplot() +
+  geom_sf(data=filter(plots_states, test_state==0),
+          color="#0072B2", linewidth=1.5) + 
+  geom_sf(data=filter(plots_states, test_state==1), 
+          color="#D27D1C", linewidth=1.5) +
+  geom_sf(data=ppr, color="black", alpha=0) +
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "none"  
+  )
+```
+
+Figure 2: different wet point selections
+```{r}
+################################
+# find plots with big ponds
+ponds %>% 
+  st_drop_geometry() %>% 
+  filter(dataset=='2022') %>%
+  group_by(Plot) %>% 
+  summarize(n_big = sum(area_m > 200000)) %>% 
+  arrange(desc(n_big))
+
+# pond centroids (plot 265 or 263 are ok)
+plot_1_ponds <- ponds %>% 
+  filter(dataset == "2022" & Plot == 265)  %>% 
+  filter(area_m > 10000) # remove these, just for the visual
+
+plot_1_centroids <- st_centroid(plot_1_ponds) 
+
+ggplot() + 
+  geom_sf(data=plot_1_ponds, fill="lightblue") +
+  geom_sf(data=plot_1_centroids) + 
+    theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "none"  
+  )
+
+################################
+# random - 1 point
+
+# function to sample 1 point from each pond
+sample_points <- function(geometry) {st_sample(geometry, 1, force = TRUE)}
+
+# sample 
+plot_1_random <- st_geometry(plot_1_ponds) %>%
+  lapply(sample_points)
+
+# convert to sf
+plot_1_random <- st_sfc(do.call(c, plot_1_random), 
+                        crs = st_crs(plot_1_ponds)) %>%
+  st_as_sf()
+
+ggplot() + 
+  geom_sf(data=plot_1_ponds, fill="lightblue") +
+  geom_sf(data=plot_1_random) + 
+    theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "none"  
+  )
+
+
+################################
+
+# random - many points
+
+# Function to sample 1 point from each pond
+safe_sample <- function(geometry) {
+  tryCatch({
+    sampled_point <- st_sample(geometry, 1, force = TRUE)
+    if (length(sampled_point) == 0) {
+      return(NA)
+    } else {
+      return(sampled_point)
+    }
+  }, error = function(e) {
+    return(NA)  # Return NA in case of error
+  })
+}
+
+# Function to sample 200 more points without replacement
+cycle_sample <- function(grouped_sf, n) {
+  
+  # Step 1: Sample 1 point per pond
+  sampled_points <- grouped_sf %>%
+    mutate(sample_point = map(geometry, safe_sample)) %>%
+    filter(!map_lgl(sample_point, ~ all(is.na(.x))))  # Remove NAs
+  
+  n_ponds <- nrow(sampled_points)
+  
+    # Step 2: If fewer than `n` ponds, re-sample (without replacement) from existing ponds to get additional points
+    if (n_ponds < n) {
+      
+      remaining_needed <- n - n_ponds
+      
+      # Resample new points from existing ponds without repeating previous samples
+      extra_samples <- grouped_sf %>%
+        slice(rep(1:n_ponds, length.out = remaining_needed)) %>%
+        mutate(sample_point = map(geometry, safe_sample)) 
+      
+      # Remove NAs from new samples
+      extra_samples <- extra_samples %>%
+        filter(!map_lgl(sample_point, ~ all(is.na(.x))))
+      
+      # Combine initial and additional samples
+      sampled_points <- bind_rows(sampled_points, extra_samples)
+    }
+
+    return(sampled_points)
+  }
+
+# Apply the sampling function to all plots
+wetPoints <- plot_1_ponds %>%
+  group_by(Plot, dataset) %>%
+  group_modify(~ cycle_sample(.x, n=200)) %>%
+  ungroup() 
+
+plot_1_manyrandom <- st_as_sf(
+  data.frame(
+    geometry = do.call(c, wetPoints$sample_point),  
+    st_drop_geometry(wetPoints) 
+  ) %>% select(-sample_point) 
+) %>% st_set_crs(4326) %>% 
+  distinct() 
+
+ggplot() + 
+  geom_sf(data=plot_1_ponds, fill="lightblue") +
+  geom_sf(data=plot_1_manyrandom) + 
+    theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "none"  
+  )
+
+################################
+# get edges
+template_rast <- plot_1_ponds %>% 
+  st_transform(32614) %>% 
+  vect() %>% 
+  rast(res=10)
+
+plot_1_ponds_rast <- plot_1_ponds %>% 
+  st_transform(32614) %>% 
+  rasterize(template_rast, values=1, background=NA) 
+
+edges <- boundaries(plot_1_ponds_rast, classes = TRUE) 
+
+# Function to randomly sample 20 pixels from a raster
+sample_pixels <- function(rast, n) {
+  # Get cell indices of non-NA pixels
+  cells <- which(!is.na(values(rast)))
+  
+  # Sample 'n' random indices
+  sample_cells <- sample(cells, min(n, length(cells)))  # Avoid errors if <20 pixels exist
+  
+  # Extract coordinates of sampled pixels
+  coords <- xyFromCell(rast, sample_cells)
+  
+  # Convert to sf
+  sf_points <- st_as_sf(as.data.frame(coords), coords = c("x", "y"), crs = 32614) %>% 
+    st_transform(4326)
+ 
+  return(sf_points)
+}
+
+edge_pixels <- edges
+edge_pixels[edges == 0] <- NA  
+edge_samples <- sample_pixels(edge_pixels, 50)
+
+interior_pixels <- edges
+interior_pixels[edges == 1] <- NA  
+interior_samples <- sample_pixels(interior_pixels, 50)
+
+ggplot() + 
+  geom_sf(data=plot_1_ponds, fill="lightblue") +
+  geom_sf(data=interior_samples, color="navy") + 
+  geom_sf(data=edge_samples, color="darkorange") + 
+    theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "none"  
+  )
+
+```
+

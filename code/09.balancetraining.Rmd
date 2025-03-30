@@ -22,8 +22,7 @@ ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(4326)
 
 Load training data
 ```{r, message=F}
-training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk.shp")) %>%
-  filter(!(red==0 & nir==0)) # drop this 1 row
+training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk.shp"))
 ```
 
 # set train years w full ppr coverage (we'll create CV blocks for these, later)
@@ -33,6 +32,8 @@ train_yrs_fullppr <- c("2019", "2022", "2022", "2023", "2024")
 
 ## create gridded PPR
 ```{r}
+set.seed(123)
+
 # add a grid
 grid <- st_make_grid(ppr, n=25) 
 index <- which(lengths(st_intersects(grid, ppr)) > 0)

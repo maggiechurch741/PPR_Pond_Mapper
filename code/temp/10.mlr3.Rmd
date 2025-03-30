@@ -314,7 +314,7 @@ sel_featureset2 <- c("AWEI", "IFW", "NDRE", "TCG", "blue", "GRR", "VH", "z_2", "
 sel_featureset3 <- c("AWEI", "IFW", "NDRE", "TCG", "blue", "GRR", "VH", "z_2", "NDMI2", "EVI3b", "SRBI")
 
 # limit task to our SELECTED predictors
-task <- task$select(sel_featureset3)
+task <- task$select(sel_featureset)
 
 # Train the model on all training data
 lrn_rf_final1$train(task)
@@ -375,7 +375,7 @@ testing_task <- testing %>%
                   positive="wet")
 
 # adjust task to consider only the selected features
-testing_task <- testing_task$select(sel_featureset3)
+testing_task <- testing_task$select(sel_featureset)
 
 # Predict on the OOS Testing Set using the trained model
 pred1 <- lrn_rf_final1$predict(testing_task)
@@ -429,7 +429,7 @@ confusion_by_group <- function(data, group){
 }
 
 confusion_by_group(test_results, group=dataset)
-confusion_by_group(test_results, sz_clss)
+confusion_by_group(test_results, sz_class)
 confusion_by_group(test_results, L3mod)
 confusion_by_group(test_results, STUSPS)
 
@@ -454,4 +454,31 @@ test_results %>%
   
 ```
 
+```{r}
+library(terra)
+ppr <- st_read(here("data", "boundaries", "PPJV"))
+
+pred21_1 <- rast("~/Downloads/pred_image_ppr_21-0000006400-0000044800.tif") %>% 
+  subset(c("blue", "green", "red"))  
+
+# 41m pixels and 13 bands
+dim(pred21_1)
+
+# Plot the raster extent
+pred21_1 %>% 
+  ext() %>% 
+  as.polygons() %>% 
+  st_as_sf() %>% 
+  st_set_crs(4326) %>% 
+  mapview() +
+  mapview(ppr)
+
+r_df <- pred21_1 %>% as.data.frame(xy=T)
+  
+ggplot(r_df, aes(x = x, y = y)) +
+  geom_raster(aes(fill = rgb(red, green, blue))) +
+  scale_fill_identity() + 
+  coord_fixed() + 
+  theme_minimal()
+```
 

@@ -9,10 +9,21 @@ library(mlr3pipelines)
 library(here)
 
 # Read in training data
-train <- read_csv(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.csv")) %>%
-  filter(!is.infinite(RBR) & !is.infinite(RVI) & !is.infinite(GRR)) 
+train <- read_csv(here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.csv")) %>% 
+  distinct()
 
-# this has 18 folds
+# Hmm 400 plot-surveys still had <100 wet sample points
+train_wet_100 <- train %>% 
+  filter(type=="wet") %>%
+  group_by(dataset, plot_id) %>% 
+  summarize(n=n())
+  
+
+train_sub <- train %>% 
+  filter(!is.na(NDRE)) %>% 
+  sample_frac(.001) 
+
+# this has 9 folds
 table(train$block, train$type)
 
 featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
@@ -24,15 +35,6 @@ featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
                 "RVI","TVI","WRI","WTI", "VARI", "BGR", "GRR", "RBR", "SRBI", "NPCRI",
                 "EVI3b", "EVI2b")  
 
-featureset2 <- c("VV","NDMI2","spei30d","NDRE", "NDVI",
-                 "spei30d_2","spei30d_1","water30_10","VVVH_ratio",
-                 "water90_10","z_2","NDWI","z_1","ABWI","hand90_100","VH",
-                 "TCB","NDMI1","blue","hand30_100","mNDWI2","mNDWI1","TCG",
-                 "z","red_edge_3","NDPI","BU3","AWEI",
-                 "BSI","DVW","IFW","IPVI","OSAVI",
-                 "RVI","WRI","VARI", "BGR", "GRR", "RBR", "SRBI", "NPCRI"
-)  
-
 feats <- featureset
 n_feat <- 1
 
@@ -40,7 +42,7 @@ set.seed(123)
 
 # set up task
 task <- 
-  train %>% 
+  train_sub %>% 
   select(all_of(feats), type, block) %>% 
   mutate(type=as.factor(type)) %>%  
   as_task_classif(target="type", 
@@ -51,6 +53,16 @@ rsmp_lobo <- rsmp("loo")
 task$set_col_roles("block", add_to = "group")
 rsmp_lobo$instantiate(task)
 
+#########
+
+instance = fselect(
+  fselector = fs("sequential"),
+  task =  task,
+  learner = lrn_rf,
+  resampling = rsmp_lobo,
+  measure = msr("classif.auc")
+)
+#########
 # limit task to our predictors
 task <- task$select(feats)
 
