@@ -17,26 +17,29 @@ library(tidyverse)
 library(sf)
 library(here)
 
-ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(4326)
+source(here("code", "helper_functions", "perform_kmeans.R"))
+
+plots <- st_read(here("data", "allPlots"))
+ppr <- st_read(here("data", "boundaries", "PPJV"))
 ```
 
 Load training data
 ```{r, message=F}
-training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk.shp"))
+training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.shp"))
 ```
 
 # set train years w full ppr coverage (we'll create CV blocks for these, later)
 ```{r}
-train_yrs_fullppr <- c("2019", "2022", "2022", "2023", "2024")
+trainyrs_fullppr <- c("2019", "2021", "2023")
 ```
 
-## create gridded PPR
+## divide PPR into a grid
 ```{r}
 set.seed(123)
 
 # add a grid
-grid <- st_make_grid(ppr, n=25) 
-index <- which(lengths(st_intersects(grid, ppr)) > 0)
+grid <- st_make_grid(st_transform(ppr, 3857), cellsize=(90000)) %>% st_transform(4326)
+index <- which(lengths(st_intersects(grid, plots)) > 0)
 grid_ppr <- grid[index]
 
 # convert the grid to sf
@@ -44,9 +47,16 @@ grid_sf <- grid_ppr %>%
   st_as_sf() %>%
   mutate(grid_id = row_number()) 
 
+# add proportion grid_id within the ppr
+intersection <- st_intersection(grid_sf, ppr) 
+intersection$grid_area <- st_area(intersection) %>% as.numeric() 
+intersection <- intersection %>% mutate(grid_area_prop = grid_area/max(grid_area))
+intersection <- intersection %>% st_drop_geometry() %>% select(grid_id, grid_area_prop)
+
 # add grid_id to dataset
 training <- training %>% 
-  st_join(grid_sf, join = st_intersects)
+  st_join(grid_sf, join = st_intersects) %>% # add grid_id
+  left_join(intersection)                    # add grid_area_prop
 ```
 
 ## balance dataset
@@ -64,28 +74,36 @@ My goal is to balance my samples spatially across the "grid," within each year. 
 set.seed(123)
 
 # Define threshold for undersampling and oversampling
-balanced_thresh <- 100
+balanced_thresh <- 300
 
-# Undersample in high-density cells - thin points to meet 100 points per type
+# Undersample in high-density cells - thin points to meet n points per type
 undersampled <- training %>%
-  group_by(type, dataset, grid_id) %>% 
-  filter(n() >= balanced_thresh) %>%
-  sample_n(balanced_thresh) 
+  group_split(type, dataset, grid_id) %>%
+  lapply(function(df) {
+    n_threshold <- round(unique(df$grid_area_prop) * balanced_thresh)
+    if (nrow(df) >= n_threshold) {
+      df %>% sample_n(size = n_threshold, replace = FALSE)
+    } 
+  }) %>%
+  bind_rows()
 
-# Oversample in low-density cells - duplicate points to meet 100 points per type
+# Oversample in low-density cells - duplicate points to meet n points per type
 oversampled <- training %>%
-  group_by(type, dataset, grid_id) %>% 
-  mutate(n_points = n()) %>% 
-  filter(n_points < balanced_thresh) %>%  
+  group_by(type, dataset, grid_id) %>%
+  mutate(n_points = n(),
+         n_threshold = round(grid_area_prop * balanced_thresh)) %>%
+  filter(n_points < n_threshold) %>%  # Filter for low-density groups
   do({
-    # Get the number of needed points
-    needed_points <- balanced_thresh - unique(.$n_points)  
-    # Sample new points with replacement to augment points
-    augmented_points <- slice_sample(., n = needed_points, replace = TRUE)  
-    # Combine original and augmented points
-    bind_rows(., augmented_points)  
-  }) %>% 
-  ungroup() 
+    # Calculate needed points per group
+    needed_points <- unique(.$n_threshold) - nrow(.)  
+    if (needed_points > 0) {
+      # Sample with replacement
+      augmented_points <- slice_sample(., n = needed_points, replace = TRUE)  
+      # Combine original and oversampled points
+      bind_rows(., augmented_points)  
+    } 
+  }) %>%
+  ungroup()
 
 # Combine the undersampled and oversampled datasets
 balanced_training <- 
@@ -97,41 +115,19 @@ balanced_training <-
 ```
 
 ## Create blocks for CV
-(5 groups per full year, 1 for each 2017 season)
+(2 groups per full year, 1 for each 2017 season)
 ```{r}
 set.seed(123)
 
-######################
-# Function to perform k-means on each dataset's coordinates
-perform_kmeans <- function(data) {
-  coords <- st_coordinates(data)  
-  kmeans_result <- kmeans(coords, centers = 5, algorithm = "Lloyd", iter.max = 60)
-  data$cluster_id <- kmeans_result$cluster
-  return(data)  
-}
-
 # Split by dataset and apply kmeans to each group 
 clusters <- balanced_training %>%
-  filter(dataset %in% train_yrs_fullppr) %>%
+  filter(dataset %in% trainyrs_fullppr) %>%
   group_split(dataset) %>%
-  lapply(perform_kmeans) %>% 
+  lapply(perform_kmeans, k=2) %>% 
   bind_rows() %>% 
-  bind_rows(balanced_training %>% filter(!dataset %in% train_yrs_fullppr) %>% mutate(cluster_id=1)) %>% 
+  bind_rows(balanced_training %>% filter(!dataset %in% trainyrs_fullppr) %>% mutate(cluster_id=1)) %>% 
   ungroup() %>% 
   mutate(block = paste(cluster_id, "-", dataset))
-```
-
-# Figures
-
-Visualize spatial balance
-```{r, eval=F}
-temp <- st_join(grid_sf, training, join = st_intersects) %>% 
-  filter(type=="wet") %>% 
-  group_by(grid_id.x, dataset) %>% 
-  count() 
-
-mapview(temp %>% filter(n < 100),  col.regions="red") +
-  mapview(temp %>% filter(n >= 100),  col.regions="blue") 
 ```
 
 Calculate how many ponds we thin/oversample
@@ -142,7 +138,7 @@ n_undersampled_pre <- training %>%
   st_drop_geometry() %>%
   filter(type=="wet") %>% 
   group_by(dataset, grid_id) %>% 
-  filter(n() >= balanced_thresh) %>% 
+  filter(n() >= balanced_thresh*grid_area_prop) %>% 
   nrow()
 
 n_undersampled_post <- undersampled %>% 
@@ -155,7 +151,7 @@ n_oversampled_pre = training %>%
   st_drop_geometry() %>%
   filter(type=="wet") %>% 
   group_by(dataset, grid_id) %>% 
-  filter(n() < balanced_thresh) %>% 
+  filter(n() < balanced_thresh*grid_area_prop) %>% 
   nrow()
 
 n_oversampled_post <- oversampled %>% 
@@ -176,14 +172,15 @@ n_bal_total <- balanced_training %>%
 
 
 n_total                                  # n training ponds
-n_undersampled_pre - n_undersampled_post # (-) we thin this many
-n_oversampled_post - n_oversampled_pre   # (+) we oversample this many
-n_bal_total                              # n balanced training ponds
+n_undersampled_pre - n_undersampled_post # (-) we thin this many --> 207k
+n_oversampled_post - n_oversampled_pre   # (+) we oversample this many -> 4500
+n_bal_total                              # n balanced training ponds -> 70k
 ```
 
 # Export
 Write balanced training dataset to disk
 ```{r}
-clusters %>% st_write(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.shp"), append=F)
-clusters %>% write_csv(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_b100.csv"))
+clusters %>% write_csv(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_200pt_bal.csv"))
+
+clusters %>% st_write(here("data", "train_test_data", "balanced_training", "balanced_training_2wk_200pt_bal.shp"), append=F)
 ```

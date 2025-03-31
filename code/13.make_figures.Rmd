@@ -85,10 +85,22 @@ rm(ppr_ecoregions, ecoregions, ecoregion5, ecoregion7, ecoregion8)
 
 # Train vs Test data
 ```{r}
+# mapview version
 mapview(plots %>% filter(Plot %in% test_plots), alpha = 1, col.regions="blue", color="blue", lwd=3, legend=F) + 
   mapview(plots %>% filter(!(Plot %in% test_plots)), alpha = 1, col.regions="orange", color="orange", lwd=3, legend=F) + 
   mapview(ppr, alpha.regions = 0, lwd=2, legend=F) +
   mapview(ppr_ecoregions_mod, alpha.regions = 0, lwd=1, legend=F)
+
+## ggplot version
+ggplot() +
+  geom_sf(data = plots %>% filter(Plot %in% test_plots), color="blue", lwd=1.5) + 
+  geom_sf(data = plots %>% filter(!(Plot %in% test_plots)), color="orange", lwd=1.5) +
+  geom_sf(data = ppr, color="black", alpha=0) +
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 20),           
+    axis.text.x = element_text(angle = 45, hjust = 1)  
+  )
 ```
 
 # Spectral Signature

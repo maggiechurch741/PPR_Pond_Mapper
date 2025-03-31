@@ -1,26 +1,43 @@
 ---
-  title: "Determine Train/Test Split"
-author: Maggie Church
+title: "sample_gtwpred_data"
+output: pdf_document
 date: "2024-08-16"
-updated: "2025-02-24"
-output: html_document
 ---
-  This script splits dry and wet data points into training and testing. 
+Wet and dry points were sampled from raw HAPET data in scripts 6-7. 
+From there, the points are uploaded to GEE to extract predictor values.
 
+This script samples from all (unoccluded) points, returning a subset of data for each of training and testing. 
+
+# read libraries
 ```{r}
-train_yrs_fullppr <- c("2019", "2021", "2023")
+library(tidyverse)
+library(sf)
+library(here)
+
+set.seed(123)
+
+source(here("code", "helper_functions", "VIs.R"))
+source(here("code", "helper_functions", "perform_kmeans.R"))
+```
+
+# set test years
+```{r}
 testyrs <- c("brood16", "2022", "2024")
+trainyrs_fullppr <- c("2019", "2021", "2023")
 nd_trainyrs <- c("pair16", "pair17", "brood17")
 ```
 
+# load data
 ```{r}
-library(dplyr)
-library(readr)
-library(sf)
-library(purrr)
-library(here)
+states <- st_read(here("data", "boundaries", "states")) %>% 
+  st_transform(4326)
 
-source(here("code", "helper_functions", "VIs.R"))
+plots <- st_read(here("data", "allPlots"))
+
+# load ecoregion boundaries
+ecoregion5 <- st_read(here("data", "boundaries", "reg5_eco_l3")) %>% st_transform(4326)
+ecoregion7 <- st_read(here("data", "boundaries", "reg7_eco_l3")) %>% st_transform(4326)
+ecoregion8 <- st_read(here("data", "boundaries", "reg8_eco_l3")) %>% st_transform(4326)
 ```
 
 # read in GT points (2-wk composites)
@@ -31,17 +48,10 @@ Wrangling steps:
 - calculate VIs
 - get 1 nonnull plot_id col (drops some points, mostly dubious dry ones)
 
-4wk - 200 wet points: raw nrow = 1,246,888
-2wk - 200 wet points: raw nrow = 1,093,110
-4wk - 1 point per pond: raw nrow = 
-2wk - 1 point per pond: raw nrow = 
-
 ```{r}
-set.seed(1)
-
 # Define the folder path where shapefiles are located
-folder_path_wet <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-4wk", "wet_4wk_200")
-folder_path_dry <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-4wk", "dry_4wk")
+folder_path_wet <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk", "wet_2wk_200")
+folder_path_dry <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk", "dry_2wk")
 
 # List all .shp files in the folder (ensure full path is returned)
 shp_files_wet <- list.files(path = folder_path_wet, pattern = "\\.shp$", full.names = TRUE)
@@ -87,44 +97,8 @@ all_samples <- do.call(bind_rows, shapefiles_list) %>%
 all_samples <- all_samples %>% filter(!is.na(plot_id)) 
 ```
 
-
-For the 2wk data, we had valid pixels for 
-40% of May 2016
-46% of Aug 2016
-90% of May 2017
-22% of Aug 2017
-69% of 2019
-84% of 2021
-92% of 2022
-99% of 2023
-92% of 2024
-
-For the 4wk data, we had valid pixels for
-67% of May 2016
-95% of Aug 2016
-100% of May 2017
-90% of Aug 2017
-90% of 2019
-98% of 2021
-99% of 2022
-100% of 2023
-99% of 2024
-
-```{r, eval=F, echo=F}
-# Calculate number of valid pixels (make sure you comment out the step in the chunk above where I filter values -1 to 1)
-all_samples %>% 
-  st_drop_geometry() %>%
-  group_by(dataset) %>% 
-  summarize(prop_valid = paste0(100-round(sum(red==-99990000 | red==-9999)/n()*100), "%"))
-```
-
 # Add modified Level-III ecoregion
 ```{r}
-# load ecoregion boundaries
-ecoregion5 <- st_read(here("data", "boundaries", "reg5_eco_l3")) %>% st_transform(4326)
-ecoregion7 <- st_read(here("data", "boundaries", "reg7_eco_l3")) %>% st_transform(4326)
-ecoregion8 <- st_read(here("data", "boundaries", "reg8_eco_l3")) %>% st_transform(4326)
-
 # combine ecoregion layers
 ecoregions <- bind_rows(ecoregion5, ecoregion7, ecoregion8) %>% 
   select(NA_L3NAME, NA_L2NAME)
@@ -150,75 +124,65 @@ ppr_ecoregions2 <- ppr_ecoregions %>%
 all_samples <- all_samples %>% st_join(ppr_ecoregions2) 
 ```
 
+# Coordinate-based clustering of plots within each ecoregion
 ```{r}
-# (re)equalize wet and dry points within a plot-survey 
-all_samples <- all_samples%>%
-  group_split(dataset, plot_id) %>%  # Split into list by dataset-plot
-  map_dfr(~ {
-    n_wet <- sum(.x$type == "wet")  # Count wet points in this plot
-    sampled_dry <- .x %>%
-      filter(type == "dry") %>%
-      sample_n(size = min(n(), n_wet), replace = FALSE)  # Sample dry points
-    bind_rows(filter(.x, type == "wet"), sampled_dry)  # Combine with all wet points
-  })
-```
+######################
 
-# Determine testing set
-I'll test on test on 2016 (wet) and 2019 (dry)
-Randomly select plots for out-of-space testing set: 10% of plots within each ecoregion
-```{r}
-set.seed(1)
-
-# sample 10% of plots from each L3mod, for full-region years 
-test_plot_ids_fullyrs <- all_samples %>% 
-  st_drop_geometry() %>% 
-  # limit to wet points
-  filter(type=="wet") %>%
-  # limit to full-year training sets
-  filter(!(dataset %in% testyrs) & !(dataset %in% nd_trainyrs)) %>% 
-  # limit to surveys with at least 5 ponds
-  group_by(plot_id, dataset) %>% 
-  filter(n() > 5) %>% 
-  ungroup() %>% 
-  # sample 10% of plots from each ecoregion
-  distinct(plot_id, L3mod) %>% 
+# Split by dataset and apply kmeans to each group (k=5)
+clusters5 <- plots %>%
+  st_centroid() %>% 
+  st_join(ppr_ecoregions2, join=st_intersects) %>% 
   group_by(L3mod) %>% 
-  sample_frac(0.1) %>% 
-  distinct(plot_id) %>% 
-  pull(plot_id) 
+  group_split(L3mod) %>%
+  lapply(perform_kmeans, k=5) 
 
-# sample 10% of plots for ND-only years
-test_plot_ids_ndyrs <- all_samples %>% 
-  st_drop_geometry() %>% 
-  # limit to wet points
-  filter(type=="wet") %>%
-  # limit to nd-only training sets
-  filter(dataset %in% nd_trainyrs) %>% 
-  # limit to surveys with at least 5 ponds
-  group_by(plot_id, dataset) %>% 
-  filter(n() > 5) %>% 
-  ungroup() %>% 
-  # sample 10% of plots
-  distinct(plot_id) %>% 
-  sample_frac(0.1) %>% 
-  pull(plot_id) 
+# Do again but with more groups (a couple ecoregions are too big)
+clusters12 <- plots %>%
+  st_centroid() %>% 
+  st_join(ppr_ecoregions2, join=st_intersects) %>% 
+  group_by(L3mod) %>% 
+  group_split(L3mod) %>%
+  lapply(perform_kmeans, k=12) 
 
-# combine sampled plots
-test_plot_ids <- c(test_plot_ids_fullyrs, test_plot_ids_ndyrs)
+# Finally, do again for MT specifically
+clustersMT <- plots %>%
+  st_centroid() %>% 
+  st_join(ppr_ecoregions2, join=st_intersects) %>% 
+  st_join(states) %>% 
+  filter(STUSPS=="MT") %>% 
+  group_by(L3mod) %>% 
+  group_split(L3mod) %>%
+  lapply(perform_kmeans, k=6) 
 ```
 
-I want to compare a few methods (2 vs 4 wk, 200pt vs 1pt per pond)
-and I want to make sure I'm comparing against the same test set.
-So save this test set!
+# Pick test plots
+This pulls about 14% of plots
 ```{r}
-write(test_plot_ids, here("data", "train_test_data", "test_plot_ids.txt"))
+test_plot_ids_1 <- clusters5 %>% 
+  bind_rows() %>% 
+  filter((L3mod=="Western Corn Belt Plains" & cluster_id==5)
+         | (L3mod=="Northern Forests" & cluster_id==4)
+         | (L3mod=="Lake Agassiz Plain" & cluster_id==4))
+
+test_plot_ids_2 <- clusters12 %>% 
+  bind_rows() %>%
+  filter((L3mod=="Aspen Parkland/Northern Glaciated Plains" & cluster_id==6)
+         | (L3mod == "Northwestern Plains" & cluster_id==10))
+
+test_plot_ids_3 <- clustersMT %>% 
+  bind_rows() %>%
+  filter(L3mod == "Northwestern Plains" & cluster_id==1)
+
+test_plot_ids <- bind_rows(
+    test_plot_ids_1, 
+    test_plot_ids_2,
+    test_plot_ids_3
+  ) %>% 
+  distinct(Plot) %>% 
+  pull()
 ```
 
-Read in test plot ids
-```{r}
-test_plot_ids <- scan(here("data", "train_test_data", "test_plot_ids.txt"))
-```
-
+# Split all_samples into testing and training 
 ```{r}
 # get test from novel areas and years
 testing <- all_samples %>% 
@@ -229,32 +193,26 @@ training <- all_samples %>%
   filter(!(dataset %in% testyrs | plot_id %in% test_plot_ids)) 
 ```
 
+# Add blocking variable to training set (2 folds per full year, 1 for '16-17)
 ```{r}
-set.seed(1)
-
-# Function to perform k-means on each dataset's coordinates
-perform_kmeans <- function(data) {
-  coords <- sf::st_coordinates(data)  
-  kmeans_result <- kmeans(coords, centers = 2, algorithm = "Lloyd", iter.max = 60)
-  data$cluster_id <- kmeans_result$cluster
-  return(data)  
-}
-
-# Split by dataset and apply kmeans to each group 
+# Split by dataset and apply coordinate-based kmeans to each group 
 training <- training %>%
-  filter(dataset %in% train_yrs_fullppr) %>%
+  filter(dataset %in% trainyrs_fullppr) %>%
   group_split(dataset) %>%
-  lapply(perform_kmeans) %>% 
+  lapply(perform_kmeans, k=2) %>% 
   bind_rows() %>% 
-  bind_rows(training %>% filter(!dataset %in% train_yrs_fullppr) %>% mutate(cluster_id=1)) %>% 
+  bind_rows(training %>% filter(!dataset %in% trainyrs_fullppr) %>% mutate(cluster_id=1)) %>% 
   ungroup() %>% 
   mutate(block = paste(cluster_id, "-", dataset)) 
 ```
 
-# Export training and testing
+# Export training/testing data
 ```{r}
-st_write(training, here("data", "train_test_data", "unbalanced_training", "training_4wk_200pt.shp"), append=F)
+write.table(test_plot_ids, here("data", "train_test_data", "test_plot_ids.txt"))
+
 write_csv(training, here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.csv"), append=F)
-st_write(testing,  here("data", "train_test_data", "testing", "testing_4wk_200pt.shp"), append=F)
-write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk_200pt.csv"))
+write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk_200pt.csv"), append=F)
+
+st_write(training, here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.shp"), append=F)
+st_write(testing,  here("data", "train_test_data", "testing", "testing_2wk_200pt.shp"), append=F)
 ```
