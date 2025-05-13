@@ -1,0 +1,278 @@
+---
+title: "prediction_assessment"
+output: html_document
+date: "2025-05-08"
+---
+
+```{r}
+library(tidyverse)
+library(terra)
+library(here)
+library(sf)
+library(mapview)
+library(pROC)
+
+options(sf_use_s2 = TRUE)
+```
+
+# Read in datasets
+```{r}
+ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(32614)
+plots <- st_read(here("data", "allPlots")) 
+ponds <- st_read(here("data", "allPonds")) %>% st_transform(4326)
+
+# load classified images
+#pred_May22 <- rast(here("data/gee_exports/predicted_rasters/trimmed/binary/classifiedImage_fullMay22/fullMay22.tif"))
+prob_May22 <- rast(here("data/gee_exports/predicted_rasters/trimmed/probabilities/probClassified_May22/May22.tif"))
+prob_May24 <- rast(here("data/gee_exports/predicted_rasters/trimmed/probabilities/probClassified_May24/May24.tif"))
+
+#pred_May24 <- rast(here("data/gee_exports/predicted_rasters/trimmed/binary/classifiedImage_fullMay24/fullMay24.tif"))
+
+# set test plots and time periods
+test_plot_ids <- scan(here("data/train_test_data/test_plot_ids.txt"))
+test_yrs <- c("brood16", "2022", "2024")
+
+# convert plots to a SpatVector
+plots_terra <- vect(plots)
+```
+
+# Set year...
+```{r}
+# ponds from [yr]
+ponds_yr <- ponds %>% filter(dataset=="2024") 
+prob_raster_to_use <- prob_May24
+```
+
+# Calculate AUC per plot
+```{r}
+# Loop through each plot
+for(i in 1:nrow(plots)) {
+    
+    # Load plot 
+    plot <- plots_terra[i,] %>% project("EPSG:32614")
+    plot_id <- plot$Plot
+    
+    # Get the plot's bounding box (extent)
+    plot_extent <- ext(plot)
+    
+    # Get actual ponds for this plot (true observations)
+    wet_areas <- ponds_yr %>%
+      filter(Plot == plot_id) %>%
+      st_transform(32614) %>% 
+      st_intersection(st_as_sf(plot))
+      
+     # If an appropriate raster is found, crop it to the plot's extent
+     if (nrow(wet_areas) > 0) {
+       
+       # Create the complement (dry areas)
+       dry_areas <- st_difference(st_as_sf(plot), st_union(wet_areas)) 
+      
+       # Get predicted raster for this plot (limit to 0s and 1s)
+       cropped_probs <- crop(prob_raster_to_use, plot_extent)
+       cropped_probs[cropped_probs == 2] <- NA
+       cropped_probs[cropped_probs == -9999] <- NA
+       
+       # Extract the actual values for wet areas (true positives)
+       wet_values <- terra::extract(cropped_probs, wet_areas, xy = TRUE)
+       
+       # Extract the actual values for dry areas (true negatives)
+       dry_values <- terra::extract(cropped_probs, dry_areas, xy = TRUE)
+  
+       # Combine wet and dry probabilities into a single vector
+       probs <- c(wet_values$probabilities, 
+                  dry_values$probabilities)
+        
+       # Combine wet and dry true-labels into a single vector
+       true_labels <- c(rep(1, nrow(wet_values)),
+                        rep(0, nrow(dry_values)))
+       
+       # Remove clouded/non-wetland footprints
+       na_idx <- is.na(probs)
+       probs <- probs[!na_idx]
+       true_labels <- true_labels[!na_idx]
+       
+       # Calculate AUC
+       roc_curve <- roc(true_labels, probs)
+       
+       # From that, calculate optimal dt, spec, sens
+       optimal_threshold <- coords(roc_curve, "best",
+                                   ret = c("threshold", "specificity", "sensitivity"))
+      
+       opt_dt <- optimal_threshold["threshold"] 
+       opt_spec <- optimal_threshold["specificity"]
+       opt_sens <- optimal_threshold["sensitivity"]
+       
+       # Plot curve
+       plot(roc_curve, col = "#2c7bb6", lwd = 2, main = "ROC Curve", print.auc = TRUE)
+       points(opt_spec, opt_sens, pch = 19, col = "red")
+       text(opt_spec, opt_sens, 
+            labels = paste0("dt: ", round(opt_dt, 2)), 
+            pos = 4, col = "red", cex = 0.8)
+       
+       # Print or store the AUC and optimal threshold for the plot
+       print(paste("Plot ID:", plot_id))
+       print(paste("AUC:", auc(roc_curve)))
+       print(paste("Optimal Threshold:", optimal_threshold))
+    }    
+}
+```
+
+
+```{r}
+# initialize empty list
+diff_list_22 <- list()
+
+# loop through each plot and find the appropriate raster
+for(i in 1:nrow(plots)) {
+    
+    # Load plot 
+    plot <- plots_terra[i,] %>% project("EPSG:32614")
+    plot_id <- plot$Plot
+    
+    # Get the plot's bounding box (extent)
+    plot_extent <- ext(plot)
+      
+    # get HAPET ponds for this plot HAPET pond (0=dry, 1=wet)
+    hapet_plot <- ponds_yr %>% filter(Plot==plot_id)
+    
+     # If an appropriate raster is found, crop it to the plot's extent
+     if (nrow(hapet_plot) > 0) {
+       
+       # Get predicted raster for this plot (limit to 0s and 1s)
+       cropped_prediction <- crop(raster_to_use, plot_extent)
+       cropped_prediction[cropped_prediction == 2] <- NA
+       cropped_prediction[cropped_prediction == -9999] <- NA
+       
+       # Rasterize hapet ponds for this plot
+       cropped_hapet <- hapet_plot  %>%
+        st_transform(32614) %>% 
+        terra::rasterize(cropped_prediction, field = 1, background = 0) %>%
+        crop(plot_extent)
+      
+       #  2 = correct water;  1 = overpredicted water; 
+       # -2 = correct dry;   -1 = underpredicted water
+       diff_rast <- cropped_prediction - cropped_hapet
+       diff_rast[cropped_prediction == 1 & cropped_hapet == 1] <- 2
+       diff_rast[cropped_prediction == 0 & cropped_hapet == 0] <- -2
+
+       # Give each raster a unique name and store in list
+       diff_list_22[[paste0("plot_", plot_id)]] <- diff_rast
+      
+    print(paste("Processed plot", plot_id))  # Adjust if needed to extract plot ID
+  } else { 
+    print(paste("No raster found for plot", plot_id))
+  }
+}
+```
+
+
+```{r}
+# Define the updated function to calculate accuracy metrics and include intersections
+calculate_metrics_with_intersections <- function(raster, plot_id, ponds_yr, plots_terra) {
+  
+  # Remove the 'plot_' prefix from plot_id
+  clean_plot_id <- gsub("^plot_", "", plot_id)
+  
+  # Convert raster values to a vector using terra::values()
+  values_raster <- values(raster)
+  
+  # Calculate counts for each category
+  actual_vs_pred <- table(factor(values_raster, levels = c(-2, -1, 1, 2)))
+  
+  # Extract counts
+  correct_water <- actual_vs_pred["2"]      # Correct water predictions (actual = predicted water)
+  over_predictions <- actual_vs_pred["1"]   # Over-prediction (predicted water when it's dry)
+  correct_dry <- actual_vs_pred["-2"]       # Correct dry predictions (actual = predicted dry)
+  under_predictions <- actual_vs_pred["-1"] # Undetected (predicted dry when it's water)
+  
+  # Calculate accuracy
+  oa <- (correct_water + correct_dry) / sum(actual_vs_pred)
+  
+  # Calculate Precision for water (1 as positive)
+  precision_water <- correct_water / (correct_water + over_predictions)
+  
+  # Calculate Recall for water (1 as positive)
+  recall_water <- correct_water / (correct_water + under_predictions)
+  
+  # Calculate F1 Score for water
+  f1_score_water <- 2 * (precision_water * recall_water) / (precision_water + recall_water)
+  
+  # Kappa Calculation
+  total <- sum(actual_vs_pred)
+  observed_agreement <- (correct_water + correct_dry) / total
+  expected_agreement <- ((correct_water + over_predictions) * (correct_water + under_predictions) + 
+                         (correct_dry + over_predictions) * (correct_dry + under_predictions)) / (total^2)
+  kappa <- (observed_agreement - expected_agreement) / (1 - expected_agreement)
+  
+  # Get the plot corresponding to plot_id
+  plot <- plots_terra[plots_terra$Plot == clean_plot_id,]
+  plot_extent <- ext(plot)
+  
+  # Get ponds for the plot
+  hapet_plot <- ponds_yr %>% filter(Plot == clean_plot_id)
+  
+  # If there are ponds for this plot, proceed to calculate intersections
+  if (nrow(hapet_plot) > 0) {
+    
+    # Get the wet pixels (predicted water) for this plot
+    wet_pixels_sf <- as.data.frame(xy(raster)) %>% 
+      filter(raster[] == 1) %>%  # Water pixels (predicted water)
+      st_as_sf(coords = c("x", "y"), crs = 32614) %>% 
+      st_transform(4326)  # Transform to WGS84 for intersection
+
+    # Find intersections with the ponds in the plot
+    intersections <- st_intersects(hapet_plot, wet_pixels_sf)
+    
+    # Calculate the number of detected ponds (intersections)
+    num_detected_ponds <- sum(lengths(intersections) > 0)
+  } else {
+    num_detected_ponds <- NA  # No ponds found for this plot
+  }
+  
+  # Return the metrics as a named data frame with plot ID and detected ponds count
+  return(data.frame(
+    Plot = as.numeric(clean_plot_id),
+    oa = oa,
+    precision_water = precision_water,
+    recall_water = recall_water,
+    f1_score_water = f1_score_water,
+    detected_ponds = num_detected_ponds
+  ))
+}
+
+# Apply the function to each SpatRaster in diff_list_22
+metrics_list_with_intersections <- mapply(calculate_metrics_with_intersections, 
+                                          diff_list_22, 
+                                          names(diff_list_22), 
+                                          MoreArgs = list(ponds_yr = ponds_yr, plots_terra = plots_terra),
+                                          SIMPLIFY = FALSE)
+
+# Combine the list into a data frame
+metrics_df <- do.call(rbind, metrics_list_with_intersections)
+
+# Join the metrics with the plots data (assuming plots has the Plot column)
+metrics_sf <- inner_join(plots, metrics_df, by = "Plot")
+```
+
+```{r}
+ggplot(metrics_sf) + 
+  geom_sf(aes(fill=precision_water, color=precision_water), linewidth=3) + 
+  labs(title="Water Precision - 2022") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 22), 
+    legend.title = element_text(size = 15), 
+    legend.text = element_text(size = 14)  
+  )
+
+ggplot(metrics_sf) + 
+  geom_sf(aes(fill=recall_water, color=recall_water), linewidth=3) + 
+  labs(title="Water Recall - 2022") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 22), 
+    legend.title = element_text(size = 15), 
+    legend.text = element_text(size = 14)  
+  )
+```
+

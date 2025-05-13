@@ -4,13 +4,13 @@ library(dplyr)
 library(sf)
 library(mapview)
 
-ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(4326)
+ppr <- st_read(here("data", "boundaries", "PPJV")) %>% st_transform(32614)
 plots <- st_read(here("data", "allPlots")) 
 ponds <- st_read(here("data", "allPonds")) %>% st_transform(4326)
 
 # folder path to classifiedImage_May22
-folder_path <- here("data/gee_exports/predicted_rasters/classifiedImage24")
-dataset <- "2024"
+folder_path <- here("data/gee_exports/predicted_rasters/temp")
+dataset_value <- "2022"
 
 # get filenames of all 32 tif tiles
 tif_files <- list.files(path = folder_path, pattern = "\\.tif$", full.names = TRUE)
@@ -23,40 +23,39 @@ raster_list <- lapply(tif_files, function(file){
 })
 
 #############################
-
 # stack rasters into 1 multi-layer raster object
 # raster_merged <- do.call(merge, raster_list)
   
 #############################
-  options(sf_use_s2 = TRUE)
+options(sf_use_s2 = TRUE)
 
-  # ponds from [yr]
-  ponds_yr <- ponds %>% filter(dataset==dataset) 
-  
-  # Convert plots to a SpatVector (terra format)
-  plots_terra <- vect(plots)
-  
-  # Create an empty list to store the cropped rasters
-  cropped_rasters <- list()
-  
-  # Initialize an empty data frame to store the results
-  accuracy_results <- data.frame(
-    Plot = integer(),
-    Correct_Area = numeric(),
-    Underestimated_Area = numeric(),
-    Overestimated_Area = numeric(),
-    stringsAsFactors = FALSE
-  )
-  
-  # Loop through each plot and find the appropriate raster
-  for(i in 1:nrow(plots)) {
+# ponds from [yr]
+ponds_yr <- ponds %>% filter(dataset==dataset_value) 
+
+# Convert plots to a SpatVector (terra format)
+plots_terra <- vect(plots)
+
+# Create an empty list to store the cropped rasters
+cropped_rasters <- list()
+
+# Initialize an empty data frame to store the results
+accuracy_results <- data.frame(
+  Plot = integer(),
+  Correct_Area = numeric(),
+  Underestimated_Area = numeric(),
+  Overestimated_Area = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each plot and find the appropriate raster
+for(i in 1:nrow(plots)) {
     
-    plot <- plots_terra[i,]
+    plot <- plots_terra[i,] %>% project("EPSG:32614")
     plot_id <- plot$Plot
     
     # Get the plot's bounding box (extent)
     plot_extent <- ext(plot)
-    
+    # 48.86, 48.89, -100.05, -100.01
     # Find the raster that overlaps with the plot's bounding box
     raster_to_use <- NULL
     for (rast in raster_list) {
@@ -85,7 +84,8 @@ raster_list <- lapply(tif_files, function(file){
       # calculate accuracy
       
         # convert to utm for better area prediction
-        cropped_raster_utm <- project(cropped_raster, "EPSG:32614", res=10)
+        #cropped_raster_utm <- project(cropped_raster, "EPSG:32614", res=10)
+        cropped_raster_utm <- cropped_raster
         ponds_raster_utm <- project(ponds_raster, "EPSG:32614", res=10)
         cell_area <- 100
         
@@ -126,7 +126,10 @@ raster_list <- lapply(tif_files, function(file){
   } else {
     print(paste("No raster found for plot", plot_id))
   }
-}
+  }
+  
+accuracy_results <- accuracy_results %>% 
+  filter(!(Plot %in% c(914, 945)))
 
 ##########################
 # OOT PLOT-WIDE ACCURACY 
@@ -143,7 +146,7 @@ totals$PA  # recall
 totals$UA  # precision
 totals$prop_ponds_detected
 
-# 50% threshold: May 22: 99.2% PA // 74.2% UA 
+# 50% threshold: May 22: 99.2% PA // 74.2% UA -- 86% of ponds
 # 60% threshold: May 22: 99.0% PA // 78.1% UA 
 # 70% threshold: May 22: 98.8% PA // 83.0% UA 
 # 80% threshold: May 22: 97.6% PA // 90.4% UA -- 76% of ponds
@@ -179,7 +182,7 @@ plots %>%
   mapview(zcol="prop_ponds_detected", cex=6)
 
 # btw, num ponds detected is wrong for all exports except thresh=50 and 80
-write.csv(accuracy_results, here("data/accuracy_24_thresh50.csv"))
+write.csv(accuracy_results, here("data/accuracy_22_thresh50.csv"))
 
 #################
 # OOST PLOT-WIDE ACCURACY 
@@ -198,8 +201,6 @@ totals <- accuracy_results %>%
 totals$PA  # recall
 totals$UA  # precision
 totals$prop_ponds_detected
-
-# 80% threshold: May 22: 98.1% PA // 92.8% UA -- 76% of ponds
 
 
 plot_totals <- accuracy_results %>% 

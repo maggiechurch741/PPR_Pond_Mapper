@@ -1,0 +1,454 @@
+---
+title: "Model Development"
+author: "Maggie Church"
+date: "October 12, 2024"
+updated: "2025-02-24"
+output: html_document
+---
+
+Steps: 1. Load libraries 2. Load data 3. Split data into training and
+testing sets 4. Tune the model on the inner training set 5. Build model
+on the outer training data; save model for future use 6. Predict model
+on outer testing data for final model evaluation 7. Predict novel pixels
+using site-level data
+
+# 1.  Load libraries
+```{r, message=F}
+# install.packages("Ckmeans.1d.dp")
+# install.packages("tidyterra")
+
+library(sf)
+library(tidyverse)
+library(mlr3verse)
+library(mlr3spatiotempcv)
+library(mlr3fselect)        # feature selection
+library(mlr3learners)       # most important machine learning algorithms
+library(mlr3tuning)         # hyperparameter tuning
+library(mlr3tuningspaces)   # suggested hyperparameter tuning spaces
+library(parallelly)
+library(future)
+library(mlr3pipelines)
+library(here)
+```
+
+# 2.  Load data
+```{r, message=F}
+# training is 2017, 2021-2024
+training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk.shp")) %>% 
+  as.data.frame()
+
+# testing is 2016 and 2019 + out-of-space plots
+testing <- read_csv(here("data", "train_test_data", "testing", "testing_2wk.csv")) 
+
+# feature set
+featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
+                "spei30d_2","red","spei30d_1","nir","water30_10","VVVH_ratio",
+                "water90_10","green","z_2","NDWI","z_1","ABWI","hand90_100","VH",
+                "TCB","NDMI1","blue","hand30_100","mNDWI2","mNDWI1","TCG",
+                "red_edge_1","z","red_edge_2","red_edge_3","NDPI","BU3","AWEI",
+                "AWEISH","BSI","DVW","DVI","IFW","IPVI","MIFW","OSAVI","SAVI",
+                "RVI","TVI","WRI","WTI", "VARI", "BGR", "GRR", "RBR", "SRBI", "NPCRI",
+                "EVI3b", "EVI2b")   
+```
+
+
+# 3. Feature Selection
+
+fsi: Optimizes feature subset for the learner. All feature subsets are evaluated on the same data splits.
+
+[![Marc Becker,
+2023](images/RFECV.png)](https://mlr-org.com/gallery/optimization/2023-02-07-recursive-feature-elimination/#fig-flowchart)
+
+```{r}
+set.seed(123)
+
+# setup parallel processing
+w <- availableCores()
+plan("multisession", workers=w)
+
+# set up task
+task <- 
+  dat %>% 
+  select(all_of(featureset), type, block) %>% 
+  mutate(type=as.factor(type)) %>%  
+  as_task_classif(target="type", 
+                  positive="wet")
+
+# instantiate leave-one-block-out resampling method
+rsmp_lobo <- rsmp("loo")
+task$set_col_roles("block", add_to = "group")
+rsmp_lobo$instantiate(task)
+
+# limit task to our predictors
+task <- task$select(featureset)
+
+# check that each block will be used as a test set once 
+stopifnot(rsmp_lobo$iters == n_distinct(dat$block))
+
+# specify algorithm - here I use random forest
+# default max.depth is unlimited. a higher depth will be more complex, 10 is still pretty-high end, and hopefully helps with efficiency.
+# num.trees: a good rule of thumb is to start with 10 times the number of features
+# More trees provide more robust and stable error estimates and variable importance measures; however, the impact on computation time increases linearly with the number of trees.
+lrn_rf = lrn("classif.ranger",
+             predict_type = "prob",
+             importance = "impurity",
+             num.trees = 570, 
+             max.depth = 10)
+
+# specify feature selection method
+fselector = fs("rfecv",
+               feature_number = 1,      # 1 feature is removed in each elimination
+               n_features = 1)          # selection stops there's 1 feature left
+
+# specify meature to optimize for
+measure = msr("classif.auc")
+
+# set up the feature selection process
+instance = fsi(
+  task =  task,
+  learner = lrn_rf,               # our RF learner
+  resampling = rsmp_lobo,         # our custom leave-one-block-out resampling strategy
+  measure = measure,              # feature selection will aim to optimize AUC 
+  terminator = trm("none"),
+  store_benchmark_result = FALSE, # had to set this to F for memory efficiency
+  store_models = TRUE             # needed to assess RFE, when the above is F
+)
+
+# execute feature selection process
+fselector$optimize(instance)
+
+# turn off parallel processing
+plan("sequential")
+```
+
+## Assess feature selection
+```{r}
+# get the RFE archive
+rfe_archive = as.data.table(instance$archive)[!is.na(iteration), ]
+
+nfeats <- length(featureset)
+
+rfe_summary = rfe_archive %>% 
+   group_by(batch_nr) %>% 
+   summarize(y = mean(classif.auc)) %>% 
+   mutate(n_feat = nfeats - batch_nr + 1)
+
+ # plot average model performance vs n_features
+ ggplot(rfe_summary, aes(x = n_feat, y = y)) +
+   geom_line(
+     color = viridis(1, begin = 0.5),
+     linewidth = 1) +
+   geom_point(
+     fill = viridis(1, begin = 0.5),
+     shape = 21,
+     size = 1,
+     stroke = 0.5,
+     alpha = 0.8) +
+   geom_vline(
+     xintercept = rfe_summary[rfe_summary$y == max(rfe_summary$y), ]$n_feat,
+     colour = viridis(1, begin = 0.33),
+     linetype = 3
+   ) +
+   xlab("Number of Features") +
+   ylab("Mean AUC") +
+   theme_minimal()
+
+```
+
+# 4. Hyperparameter Tuning
+```{r}
+set.seed(123)
+
+# setup parallel processing
+w <- availableCores()
+plan("multisession", workers=w)
+
+sel_featureset1 <- c("AWEI", "AWEISH", "NDRE", "TCB", "TCW", "swir1", "swir2", "RBR", "GRR", "VH", "z_2", "z_1")
+
+sel_featureset2 <- c("AWEI", "IFW", "NDRE", "TCG", "blue", "GRR", "VH", "z_2", "NDMI2")
+
+# set up task
+task <- 
+  dat %>% 
+  select(all_of(sel_featureset), type, block) %>% 
+  mutate(type=as.factor(type)) %>%  
+  as_task_classif(target="type", 
+                  positive="wet")
+
+# instantiate leave-one-block-out resampling method
+rsmp_lobo <- rsmp("loo")
+task$set_col_roles("block", add_to = "group")
+rsmp_lobo$instantiate(task)
+
+# limit task to our SELECTED predictors
+task <- task$select(sel_featureset)
+
+# specify algorithm - here I use random forest
+lrn_rf = lrn("classif.ranger", predict_type = "prob"
+             , importance = "impurity"
+             , num.trees = 500, max.depth = 10)
+
+# set tuning space 
+search_space = lts("classif.ranger.default")
+
+# set tuning method
+tuner = mlr3tuning::tnr("grid_search", resolution = 25) 
+
+# set tuning terminator
+terminator = trm("stagnation", iters=4, threshold=0.1)
+
+# specify measure to optimize for
+measure = msr("classif.auc")
+
+# initialize tuning instance
+instance = ti(
+  task = task,
+  learner = lrn_rf,
+  resampling = rsmp_lobo, 
+  measures = measure,
+  terminator = terminator, 
+  store_models = FALSE,
+  search_space = search_space
+)
+
+# execute tuning process
+tuner$optimize(instance)
+
+# print best hyperparameters
+print(paste("OPTIMAL HYPERPARAMETERS:", instance$result_learner_param_vals))
+```
+
+importance :  impurity
+max.depth :  10
+num.threads :  1
+num.trees :  167
+mtry.ratio :  0.458333333333333
+replace :  TRUE
+sample.fraction :  0.1
+
+importance :  impurity
+max.depth :  10
+num.threads :  1
+num.trees :  1077
+mtry.ratio :  0.743589743589744
+replace :  FALSE
+sample.fraction :  0.192307692307692=
+
+# Train the final model
+```{r}
+# tuning: grid search, resolution=25, stagnation (iters=4, thresh=0.1 auc) - default space
+lrn_rf_final1 = lrn("classif.ranger", 
+                   predict_type = "prob", 
+                   importance = "impurity",
+                   max.depth = 10,
+                   num.threads = 1,
+                   num.trees = 167,
+                   mtry.ratio =  0.458333333333333,
+                   replace = TRUE,
+                   sample.fraction = 0.1)
+
+# tuning: grid search, resolution=100, stagnation (iters=4, thresh=0.1 auc) - default space
+terminator = trm("stagnation", iters=4, threshold=0.1)
+lrn_rf_final = lrn("classif.ranger", 
+                   predict_type = "prob", 
+                   importance = "impurity",
+                   max.depth = 10,
+                   num.threads = 1,
+                   num.trees = 1077,
+                   mtry.ratio =  0.743589743589744,
+                   replace = FALSE,
+                   sample.fraction = 0.192307692307692)
+
+# tuning: grid_search, n_evals=40 - default space
+clf <- xgboost(data = training_predictor_matrix,  
+               label = training_resp,
+               booster="gbtree",
+               objective= "multi:softprob",
+               eval_metric="mlogloss",
+               num_class=2, 
+               nrounds = 3140,
+               params = hyperparam,
+               verbose=0)
+
+# colsample_bylevel: 0.6974617
+# colsampe_bytree: 0.6472711
+# max_depth: 10
+# subsample: 0.4163803
+```
+       alpha colsample_bylevel colsample_bytree       eta    lambda max_depth
+       <num>             <num>            <num>     <num>     <num>     <int>
+1: -6.574311         0.6974617        0.6472711 -5.983036 -3.804526        10
+   nrounds subsample learner_param_vals  x_domain classif.auc
+     <int>     <num>             <list>    <list>       <num>
+1:    3140 0.4163803         <list[13]> <list[8]>   0.8999123
+
+ [1] "OPTIMAL HYPERPARAMETERS: gbtree" #            
+ [2] "OPTIMAL HYPERPARAMETERS: mlogloss" #       
+ [3] "OPTIMAL HYPERPARAMETERS: 3140"  #             
+ [4] "OPTIMAL HYPERPARAMETERS: 1"                  
+ [5] "OPTIMAL HYPERPARAMETERS: multi:softprob"#     
+ [6] "OPTIMAL HYPERPARAMETERS: 0"                  
+ [7] "OPTIMAL HYPERPARAMETERS: 0.00139576752848572" # alpha MIN OF THE SEARCH SPACE
+ [8] "OPTIMAL HYPERPARAMETERS: 0.6974617"           # colsample_bylevel
+ [9] "OPTIMAL HYPERPARAMETERS: 0.6472711"           # colsample_bytree
+[10] "OPTIMAL HYPERPARAMETERS: 0.00252116110978997" # ? eta
+[11] "OPTIMAL HYPERPARAMETERS: 0.0222697411553501"  # ? lambda
+[12] "OPTIMAL HYPERPARAMETERS: 10"                  # max_depth               
+[13] "OPTIMAL HYPERPARAMETERS: 0.416380313038826"   # subsample
+
+
+# Train final model
+```{r}
+training <- training %>%  filter(!is.na(NDRE))
+sel_featureset <- c("AWEI", "TCB", "NDRE", "IFW", "BU3", "VH", "EVI3b", "TCG", "NDMI2", "TVI", "spei30d_2")
+
+# set up task
+task <- 
+  training %>% 
+  select(all_of(sel_featureset), type) %>% 
+  mutate(type=as.factor(type)) %>%  
+  as_task_classif(target="type", 
+                  positive="wet")
+
+# limit task to our SELECTED predictors
+task <- task$select(sel_featureset)
+
+# Train the model on all training data
+lrn_rf_final1$train(task)
+```
+
+# Assess feat importance
+```{r}
+# Extract the variable importance
+lrn_rf_final1$importance()  
+
+# Plot importance values
+as.data.frame(lrn_rf_final1$importance()) %>%
+  rownames_to_column("feature") %>% 
+  rename("importance"=2) %>%
+  ggplot(aes(x= reorder(feature, importance), y=importance)) +
+  geom_bar(stat = "identity") + 
+  coord_flip() + 
+  labs(x="feature") +
+  theme(
+    axis.text.x = element_text(size = 20),              # Increase x-axis text size
+    axis.text.y = element_text(size = 20)               # Increase y-axis text size
+  )
+
+# SHAPLEY
+# Convert the trained model to an iml Predictor object
+
+# training data
+X <- as.data.frame(task$data(cols = sel_featureset)) 
+
+# prediction function
+predictor <- Predictor$new(model = lrn_rf, 
+                           data = X, 
+                           y = task$truth())
+
+# Choose an instance (row) for which you want to calculate Shapley values
+# For example, let's select the first row of the testing set
+observation <- X[1, , drop = FALSE]
+
+# Step 4: compute Shapley values for the selected obs
+shapley <- Shapley$new(predictor, x.interest = observation)
+shapley_values <- shapley$results
+
+# Plot the Shapley values
+plot(shapley)
+```
+
+# Testing Accuracy
+```{r}
+set.seed(123)
+
+#  Prepare the testing task (if not already done)
+testing_task <- testing %>% 
+  # filter(!(dataset %in% c("pair16", "brood16", "pair17", "brood17"))) %>% 
+  mutate(flyvr_d = as.character(flyvr_d)) %>% 
+  st_drop_geometry() %>% 
+  mutate(type=as.factor(type)) %>%  
+  as_task_classif(target="type", 
+                  positive="wet")
+
+# adjust task to consider only the selected features
+testing_task <- testing_task$select(sel_featureset3)
+
+# Predict on the OOS Testing Set using the trained model
+pred1 <- lrn_rf_final1$predict(testing_task)
+#pred2 <- lrn_rf_final2$predict(testing_task)
+
+pred1$score(measures = msr("classif.auc"))
+#pred2$score(measures = msr("classif.auc"))
+
+pred1$confusion
+#pred2$confusion
+```
+
+
+```{r}
+test_results <- testing %>% 
+  mutate(predicted = pred1$response) %>%
+  mutate(misclassified = ifelse(type != predicted, TRUE, FALSE))
+
+# Loop through each group and calculate the confusion matrix
+confusion_by_group <- function(data, group){
+  
+   results <- data %>% 
+    group_by({{ group }}) %>% 
+      group_split() %>%
+      lapply(function(group_data) {    
+          group_name <- unique(group_data %>% pull({{ group }})) 
+          actual <- as.factor(group_data$type)
+          predicted <- as.factor(group_data$predicted)
+          
+          # Adjust the levels to ensure consistency between actual and predicted
+          levels_combined <- unique(c(levels(actual), levels(predicted)))
+          actual <- factor(actual, levels = levels_combined)
+          predicted <- factor(predicted, levels = levels_combined)
+        
+          # Generate the confusion matrix for this group
+          confusion <- caret::confusionMatrix(predicted, actual, positive = "wet", mode = "everything")
+          
+          #list(group = group_name, confusion_matrix = confusion)
+          
+          # Extract overall accuracy from the confusion matrix
+          # Extract overall accuracy from the confusion matrix
+      accuracy <- as.numeric(confusion$overall['Accuracy'])
+      
+      # Return a named list with group_name and accuracy
+      return(data.frame(grid_id = group_name, Accuracy = accuracy))
+          
+    })
+  # Combine the list of data frames into a single data frame
+  final_df <- do.call(rbind, results)
+  return(final_df)
+}
+
+confusion_by_group(test_results, group=dataset)
+confusion_by_group(test_results, sz_clss)
+confusion_by_group(test_results, L3mod)
+confusion_by_group(test_results, STUSPS)
+
+grid_sf <- st_read('../data/inputs/grid/grid_sf.shp')
+
+oa_grid <- confusion_by_group(test_results, grid_id) %>% 
+  left_join(grid_sf) %>% 
+  st_as_sf()
+
+mapview(oa_grid, zcol="Accuracy", col.regions=viridis(100, option = "C"))
+
+test_results %>% 
+  st_drop_geometry() %>% 
+  group_by(grid_id) %>% 
+  summarize(n_sma = sum(sz_clss=="small (<2 acres)", na.rm=T),
+            n_med = sum(sz_clss=="med (2-5 acres)", na.rm=T),
+            n_lar = sum(sz_clss=="large (> 5 acres)", na.rm=T)) %>% 
+  mutate(prop_small = n_sma/(n_sma + n_med + n_lar)) %>% 
+  left_join(grid_sf) %>% 
+  st_as_sf() %>% 
+  mapview(zcol="prop_small")
+  
+```
+
+
