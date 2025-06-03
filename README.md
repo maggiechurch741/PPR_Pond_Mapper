@@ -9,17 +9,19 @@ How it works:
 We trained a random forest model on thousands of aerial images (1.5m resolution, digitized into surface water polygons by experts) across 680 4 mi^2 plots and 9 survey periods between 2016-2024. 
 
 Technical details: 
-1.  First, we create a tif of our area of interest in Google Earth Engine. These are areas with evidence of historical wetland footprint, as indicated by:
+1.  First, we **create a tif of our area of interest** in Google Earth Engine. These are areas with evidence of historical wetland footprint, as indicated by:
     * The National Wetland Inventory
     * The Global Surface Water's max water extent layer
     * The Soil Survey Geographic Database's hydric soils layer 
     * Our aerial surveys
     * (Minus Census roads)
 
-<p align="center">
-  <img src="code/images/WetlandFootprint.png" alt="Wetland footprint sources" width="800">
-</p>
-<p align="center"><em>Wetland footprint sources (white areas indicate wetland evidence).</em></p>
+<figure style="margin: 0; padding: 0; text-align: center;">
+  <img src="code/images/WetlandFootprint.png" alt="Wetland footprint sources" width="800" style="display: block; margin: 0 auto;" />
+  <figcaption style="margin-top: 2px; font-style: italic;">
+    Wetland footprint sources (white areas indicate wetland evidence).
+  </figcaption>
+</figure>
 
 When you combine these sources, we get an area of interest like this: 
 <p align="center">
