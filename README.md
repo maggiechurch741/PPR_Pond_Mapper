@@ -16,12 +16,13 @@ Technical details:
     * Our aerial surveys
     * (Minus Census roads)
 
-<figure style="margin: 0; padding: 0; text-align: center;">
-  <img src="code/images/WetlandFootprint.png" alt="Wetland footprint sources" width="800" style="display: block; margin: 0 auto;" />
-  <figcaption style="margin-top: 2px; font-style: italic;">
-    Wetland footprint sources (white areas indicate wetland evidence).
-  </figcaption>
-</figure>
+
+<p align="center" style="margin-bottom: 0;">
+  <img src="code/images/WetlandFootprint.png" alt="Wetland footprint sources" width="800" />
+</p>
+<p align="center" style="margin-top: 2px; font-style: italic; margin-bottom: 0;">
+   Wetland footprint sources (white areas indicate wetland evidence).
+</p>
 
 When you combine these sources, we get an area of interest like this: 
 <p align="center">
