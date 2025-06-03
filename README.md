@@ -17,8 +17,9 @@ Technical details:
     * (Minus Census roads)
 
 <p align="center">
-  <img src="code/images/5.dryROI.png" alt="Brief description of image" width="500">
+  <img src="code/images/5.dryROI.png" alt="Historic Wetland Footprint of a Plot" width="400">
 </p>
+<p align="center"><em>Historic wetland footprint of a plot.</em></p>
 
 2.  Scripts 1-7 sample from wet and dry areas within historic wetland footprints:
   * First, we remove all ponds <400m2. Next, we randomly sample 200 wet points per plot-survey: we pick 1 point per pond, and cycle back through to pick new points, until we reach 200. Resample points if necessary. We avoid sampling within 7.5m of the pond's edge, to avoid mixed pixels. 
