@@ -16,8 +16,8 @@ Technical details:
     * Our aerial surveys
     * (Minus Census roads)
 
-    <p align="center">
-  <img src="code/images/WetlandFootprint.png" alt="Wetland footprint sources" width="400">
+<p align="center">
+  <img src="code/images/WetlandFootprint.png" alt="Wetland footprint sources" width="800">
 </p>
 <p align="center"><em>Wetland footprint sources (white areas indicate wetland evidence).</em></p>
 
