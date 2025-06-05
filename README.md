@@ -2,7 +2,10 @@
 
 The PPR Pond Mapper is an open-source tool for **monitoring surface water within wetlands, lake, and river boundaries** across the United States portion of the Prairie Pothole Region (PPR). Developed in collaboration with the Prairie Pothole Joint Venture, Ducks Unlimited, and the U.S. Fish and Wildlife Service, this tool supports conservation and research efforts by providing consistent, spatially explicit wetland inundation data.
 
-----
+This GitHub Repo stores the code used to build and evaluate the PPR Pond Mapper. 
+
+To use the tool, visit [GEE link]. Simply select your area and timespan of interest, then click Run to generate predictions. The output is a **10-meter resolution** map showing areas likely to be inundated or dry.  More detailed guidance can be found [here].
+
 
 ## How it works: 
 We trained a random forest model on thousands of aerial images, captured by the US Fish & Widlife's (USFWS) Habitat and Population Evaluation Team ("HAPET") over 680 4mi^2 plots and 9 survey periods between 2016-2024. These images have a 1.5m resolution and are digitized by HAPET into surface water polygons. 
@@ -70,10 +73,5 @@ Spatiotemporally balanced training set:
 
 
 ### Model Selection (R scripts 11-12)
-* **Features**: We use recursive feature elimination with random forests, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set. 
+* **Features**: We use recursive feature elimination, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set. 
 * **Hyperparameters:** We tuned random forest hyperparameters on the reduced feature set, using a grid search.
-  
-
-## How to use
-In GEE, select the area and timespan of interest. Click run, and then begin download. Can take hours...
-  
