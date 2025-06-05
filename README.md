@@ -28,7 +28,7 @@ To focus predictions, we limit analysis to pixels with historical evidence of we
 These sources are combined in Google Earth Engine to generate a wetland footprint mask.
 
 <p align="center">
-  <img src="code/images/5.dryROI.png" alt="Historic Wetland Footprint of a Plot" width="400">
+  <img src="code/images/2.poss_remove_edges.png" alt="Historic Wetland Footprint of a Plot" width="400">
 </p>
 <p align="center"><em>Historic wetland footprint of a plot (yellow).</em></p>
 
