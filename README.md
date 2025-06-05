@@ -7,11 +7,11 @@ The PPR Pond Mapper is an open-source tool for **monitoring surface water within
 To use the tool, visit [GEE link]. Simply select your area and timespan of interest, then click Run to generate predictions. The output is a **10-meter resolution** map showing areas likely to be inundated or dry.  More detailed guidance can be found [here].
 
 
-## How it works: 
+## How we built the model 
 We trained a random forest model on thousands of aerial images, captured by the US Fish & Widlife's (USFWS) Habitat and Population Evaluation Team ("HAPET") over 680 4mi^2 plots and 9 survey periods between 2016-2024. These images have a 1.5m resolution and are digitized by HAPET into surface water polygons. 
 
 ### Wetland Footprint 
-To focus predictions, we limit analysis to pixels with historical evidence of wetlands, based on multiple data sources:
+To focus predictions, we limit analysis to pixels with historical evidence of wetlands within the PPJV administrative boundary, based on multiple data sources:
 
 * USFWS National Wetland Inventory (NWI)
 * JRC Global Surface Water Maximum Water Extent
@@ -28,7 +28,7 @@ To focus predictions, we limit analysis to pixels with historical evidence of we
 These sources are combined in Google Earth Engine to generate a wetland footprint mask.
 
 <p align="center">
-  <img src="code/images/2.poss_remove_edges.png" alt="Historic Wetland Footprint of a Plot" width="400">
+  <img src="code/images/2.poss_remove_edges.png" alt="Historic Wetland Footprint of a HAPET Plot" width="400">
 </p>
 <p align="center"><em>Historic wetland footprint of a plot (yellow).</em></p>
 
@@ -75,3 +75,11 @@ Spatiotemporally balanced training set:
 ### Model Selection (R scripts 11-12)
 * **Features**: We use recursive feature elimination, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set. 
 * **Hyperparameters:** We tuned random forest hyperparameters on the reduced feature set, using a grid search.
+
+
+## Contact information
+Maggie Church 
+mgchurch247@gmail.com
+
+Jessica O'Connell
+jessica.oconnell@colostate.edu
