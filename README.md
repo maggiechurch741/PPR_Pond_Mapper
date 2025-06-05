@@ -70,8 +70,8 @@ Spatiotemporally balanced training set:
 
 
 ### Model Selection (R scripts 11-12)
-* We use recursive feature elimination with random forests, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set. 
-* We tuned random forest hyperparameters on the reduced feature set, using a grid search.
+* **Features**: We use recursive feature elimination with random forests, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set. 
+* **Hyperparameters:** We tuned random forest hyperparameters on the reduced feature set, using a grid search.
   
 
 ## How to use
