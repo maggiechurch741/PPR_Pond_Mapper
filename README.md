@@ -34,14 +34,13 @@ These sources are combined in Google Earth Engine to generate a wetland footprin
 
 ### Sampling Strategy (R scripts 1-7)
 
-We sample training points from each plot-survey to capture inundated and dry conditions:
+We use stratified sampling to select training points, selecting 200 water and 200 non-water points from each plot-survey-ecoregion.
 
-* Inundated points are drawn from ponds with surface areas > 400 m² (our minimum target size), with multiple points randomly selected per pond to ensure coverage across different wetland zones.
-* Dry points are sampled from historical wetland areas that were dry at the time of survey.
+* Inundated points are sampled by randomly selecting one point per pond in repeated cycles until the stratum sample size is reached.
+     * We don't sample from ponds with surface areas < 400 m² (to avoid mixed pixels) 
+* Non-inundated points are randomly sampled from historical wetland areas that were dry at the time of survey.
+* All sampled points are $\geq$ 7.5m from pond edges (to avoid mixed pixels) and $\geq$ 20m apart (to avoid duplicate Sentinel-2 pixels).
 
-All sampled points are $\geq$ 7.5m from pond edges (to avoid mixed pixels) and $\geq$ 20m apart (to avoid duplicate Sentinel-2 pixels).
-
-  
 ### Predictor Extraction
 In Google Earth Engine, we extract predictors to each sampled point:
 
