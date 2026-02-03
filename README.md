@@ -52,9 +52,9 @@ In Google Earth Engine, we extract predictors to each sampled point:
 * **Topographic depression indicies** at 30m and 90m resolution ([source](https://gee-community-catalog.org/projects/hand/))
 * **Drought indices** from GridMET ([source](https://developers.google.com/earth-engine/datasets/catalog/GRIDMET_DROUGHT))
 
-### Train/Test Design (R scripts 8-10)
+### Model Design (R scripts 8-12)
 
-Test/train split: 
+#### Test/train split (R scripts 8-10): 
 
 * **Out-of-time testing**: We hold out data from August 2016, May 2022, and May 2024 to evaluate model performance across a range of climatic conditions. These test periods span both dry and wet extremes [insert time series of PHDI with standard deviation].
 
@@ -71,7 +71,7 @@ Spatiotemporally balanced training set:
 
 
 
-### Model Selection (R scripts 11-12)
+#### Model Selection (R scripts 11-12)
 * **Features**: We use recursive feature elimination, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set. 
 * **Hyperparameters:** We tuned random forest hyperparameters on the reduced feature set, using a grid search.
 
