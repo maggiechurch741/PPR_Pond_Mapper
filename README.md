@@ -4,13 +4,33 @@ The PPR Pond Mapper is an open-source tool for **monitoring surface water** with
 
 ## How to use
 
-To use the tool, visit [GEE link](https://code.earthengine.google.com/2f358b4afc3a98f4a21105bf6b5d68dc). Simply select your area and timespan of interest, then click Run to generate predictions. The output is a **10-meter resolution** map that classifies each pixel into either:
+To use the tool, visit [GEE link](https://code.earthengine.google.com/2f358b4afc3a98f4a21105bf6b5d68dc). Simply select your area and timespan of interest then click "Run" to generate predictions.
+<p float="center">
+  <img src="code/images/gee_screenshot_setup.png" width="300" />
+</p>
 
-0 - nonwater <br/> 1 - water <br/> 2 - nonwetland <br/> 3 - cloud/shadow <br/>
+<br/>
 
-Export to your Google Drive to explore the resulting raster in your preferred software.<br/><br/>
+Export to your Google Drive to explore the resulting raster in your preferred software.
 
-*Cloud Gaps*:<br/> This model relies on Sentinel-2 Imagery, which may contain cloud gaps. Sentinel-2 has a revisit interval of 10 days before 2018, and 5 days after. Based on input from end-users, we added an option to to gap-fill the user-selected time window with the following 15 days' worth of imagery. Below is an example of what full-month coverage looks like across the U.S. PPR:
+<p float="center">
+  <img src="code/images/gee_screenshot_export.png" width="300" />
+</p>
+
+<br/>
+
+The output is a **10-meter resolution** map that classifies each pixel into either: <br/><br/>
+    0 - nonwater <br/> 
+    1 - water <br/> 
+    2 - nonwetland <br/> 
+    3 - cloud/shadow <br/>
+
+<br/><br/>
+
+#### Cloud Gaps:
+This model relies on Sentinel-2 Imagery, which may contain cloud gaps. Sentinel-2 has a revisit interval of 10 days before 2018, and 5 days after. Based on input from end-users, we added an option to to gap-fill the user-selected time window with the following 15 days' worth of imagery. 
+<br/><br/> 
+Below is an example of what full-month coverage looks like across the U.S. PPR:
 
 <p align="center">
 <strong>Monthly Cloud Coverage</strong>
@@ -134,7 +154,7 @@ Within each cell-survey combination, we sampled 750 water and 750 nonwater point
 
 #### **5. Model Selection (R scripts 11-12)**
 
--   **Features**: We use recursive feature elimination, guided by spatial and temporal cross-validation, to select a reduced and uncorrelated feature set.
+-   **Features**: We use recursive feature elimination, guided by spatiotemporal cross-validation, to select a reduced and uncorrelated feature set.
 -   **Hyperparameters:** We tuned random forest hyperparameters on the reduced feature set, using a grid search.
 
 #### **6. Model Evaluation**
