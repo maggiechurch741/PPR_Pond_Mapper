@@ -56,13 +56,9 @@ We trained a random forest model on thousands of aerial images, captured by the 
 To focus predictions, we limited analysis to pixels with historical evidence of wetlands within the PPJV administrative boundary, based on multiple data sources:
 
 -   USFWS National Wetland Inventory (NWI)
-
 -   JRC Global Surface Water Maximum Water Extent
-
 -   USFWS HAPET surveys
-
--   USDA Soil Survey Geographic Database (SSURGO) hydric soils\
-
+-   USDA Soil Survey Geographic Database (SSURGO) hydric soils
 -   Census roads - for exclusion
 
 These sources were combined in Google Earth Engine to generate a wetland footprint mask.
@@ -160,6 +156,8 @@ Within each cell-survey combination, we sampled 750 water and 750 nonwater point
 #### **6. Model Evaluation**
 
 These scripts are forthcoming
+
+**To explore model performance on test plots:** download `test_plot_viewer.html` and open it in your browser to compare model predictions with HAPET observations.
 
 ## Contact information
 
