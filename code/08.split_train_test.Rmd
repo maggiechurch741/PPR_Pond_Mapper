@@ -1,14 +1,53 @@
 ---
-title: "sample_gtwpred_data"
-output: pdf_document
-date: "2024-08-16"
+title: "Select Training Data"
+author: Maggie Church
+created: "2024-08-16"
+updated: "2025-02-24"
 ---
-Wet and dry points were sampled from raw HAPET data in scripts 6-7. 
-From there, the points are uploaded to GEE to extract predictor values.
 
-This script samples from all (unoccluded) points, returning a subset of data for each of training and testing. 
+**Description**: This script determines training and testing plots... We selected these points in scripts 6 and 7, and extracted remotely-sensed predictors to them in GEE (code [here](https://code.earthengine.google.com/f84a065caa169012bab22b3b75319eae){.uri}).
 
-# read libraries
+**Inputs:**
+
+-   Plot boundary shapefile (created in script #1)
+
+-   PPJV administrative boundary
+
+-   State boundary shapefile
+
+-   Level-III Ecoregion boundary shapefile
+
+-   Shapefiles of point data with remotely-sensed features (see GEE link above)
+
+**Steps:** 
+
+1.  Modify Level-III ecoregions
+
+2.  Select test surveys
+
+3.  Select 1 cluster of plots within each ecoregion -- these are our test plots
+
+4.  Cleanup the GEE export of water and nonwater data points with predictors (notably, drop occluded imagery)
+
+5.  Remove test plots and test surveys from the GEE-exported dataset -- these are our candidate training points
+
+6.  Add modified ecoregion to candidate training points (important attribute)
+
+7.  Add CV blocking var to candidate training points (we'll use this for spatiotemporally aware splits in cross-validation)
+
+8.  Add grid id to candidate training point (we'll use this for stratification, in selecting final training points)
+
+9.  Create a dataset of test plot-surveys
+
+**Outputs:**
+
+-  csv of test plot-surveys
+
+-  shapefile of candidate training points
+
+-  shapefile of grid (just for our records)
+
+## Load libraries
 ```{r}
 library(tidyverse)
 library(sf)
@@ -20,38 +59,26 @@ source(here("code", "helper_functions", "VIs.R"))
 source(here("code", "helper_functions", "perform_kmeans.R"))
 ```
 
-# set test years
+# Load data
 ```{r}
-testyrs <- c("brood16", "2022", "2024")
-trainyrs_fullppr <- c("2019", "2021", "2023")
-nd_trainyrs <- c("pair16", "pair17", "brood17")
-```
+# Load ppr boundary
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> st_transform(4326)
 
-# load data
-```{r}
-states <- st_read(here("data", "boundaries", "states")) %>% 
-  st_transform(4326)
-
+# read plot boundaries
 plots <- st_read(here("data", "allPlots"))
 
 # load ecoregion boundaries
-ecoregion5 <- st_read(here("data", "boundaries", "reg5_eco_l3")) %>% st_transform(4326)
-ecoregion7 <- st_read(here("data", "boundaries", "reg7_eco_l3")) %>% st_transform(4326)
-ecoregion8 <- st_read(here("data", "boundaries", "reg8_eco_l3")) %>% st_transform(4326)
-```
+ecoregion5 <- st_read(here("data", "boundaries", "reg5_eco_l3")) |> st_transform(4326)
+ecoregion7 <- st_read(here("data", "boundaries", "reg7_eco_l3")) |> st_transform(4326)
+ecoregion8 <- st_read(here("data", "boundaries", "reg8_eco_l3")) |> st_transform(4326)
 
-# read in GT points (2-wk composites)
-Wrangling steps: 
-  - rescale S2 L1C values
-- drop values outside of -1 to 1
-- convert flyvr_d to date
-- calculate VIs
-- get 1 nonnull plot_id col (drops some points, mostly dubious dry ones)
+# Load state shapefile
+states <- st_read(here("data", "boundaries", "states")) |> st_transform(4326)
 
-```{r}
+################### 
 # Define the folder path where shapefiles are located
-folder_path_wet <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk", "wet_2wk_200")
-folder_path_dry <- here("data", "gee_exports", "data_with_predictors", "PPR gtwPred-2wk", "dry_2wk")
+folder_path_wet <- here("data", "gee_exports", "data_with_predictors", "wet_200_2wk")
+folder_path_dry <- here("data", "gee_exports", "data_with_predictors", "dry_200_2wk")
 
 # List all .shp files in the folder (ensure full path is returned)
 shp_files_wet <- list.files(path = folder_path_wet, pattern = "\\.shp$", full.names = TRUE)
@@ -63,55 +90,25 @@ shapefiles_list <- lapply(shp_files, function(file) {
   
   print(file)
   
-  st_read(file, quiet = TRUE) %>%
-    mutate(type = ifelse(grepl("wet", basename(file)), "wet", "dry")) %>% 
-    st_set_crs(4326) %>% 
-    return()
+  shp <- st_read(file, quiet = TRUE) |>
+    mutate(type = ifelse(grepl("wet", basename(file)), "wet", "dry")) |> 
+    st_set_crs(4326) 
+  
+  return(shp)
 })
-
-band_cols <- c("blue", "green", "red", "red_edge_1", "red_edge_2", "red_edge_3", "nir", "swir1", "swir2")
-
-# Combine sf objects
-all_samples <- do.call(bind_rows, shapefiles_list) %>% 
-  dplyr::select(-b1) %>% 
-  # rescale S2 L1C values
-  mutate(across(all_of(band_cols),   
-                ~ if_else(dataset %in% c("pair16", "brood16", "pair17", "brood17"), .x * 10000, .x))) %>%
-  # drop values outside of -1 to 1
-  filter(!if_any(all_of(band_cols), ~ .x < -1 | .x > 1)) %>% 
-  # drop this 1 row
-  filter(!(red==0 & nir==0)) %>% 
-  # convert flyvr_d to date
-  mutate(flyvr_d = as.Date(as.POSIXct(flyvr_d / 1000, origin = "1970-01-01", tz = "UTC"))) %>% 
-  # keep only 1 plotid col
-  mutate(plot_id = if_else(is.na(plot_id), Plot, plot_id)) %>% 
-  select(-Plot) %>% 
-  # Calculate VIs
-  moreVIs() %>% 
-  # drop rows with infinite values
-  filter(!if_any(-geometry, is.infinite)) %>%
-  # drop this too 
-  filter(!is.na(NDRE)) 
-
-# Some wet sampling occured outside of plot boundaries. Drop these. 
-all_samples <- all_samples %>% filter(!is.na(plot_id)) 
 ```
 
-# Add modified Level-III ecoregion
+# 1. Modified Level-III ecoregion
 ```{r}
 # combine ecoregion layers
-ecoregions <- bind_rows(ecoregion5, ecoregion7, ecoregion8) %>% 
+ecoregions <- bind_rows(ecoregion5, ecoregion7, ecoregion8) |> 
   select(NA_L3NAME, NA_L2NAME)
-
-# load ppr boundary
-ppr <- st_read(here("data", "boundaries", "PPJV")) %>%
-  st_transform(4326)
 
 # get the ecoregions within the ppr
 ppr_ecoregions <- st_intersection(ecoregions, ppr)
 
 # modify ecoregion category, to consolidate (a region gets subsumed if <5 plots in it)
-ppr_ecoregions2 <- ppr_ecoregions %>% 
+ppr_ecoregions_mod <- ppr_ecoregions |> 
   mutate(L3mod = case_when(
     NA_L3NAME %in% c("Northwestern Great Plains", "Middle Rockies", "Canadian Rockies", "Northwestern Glaciated Plains") ~ "Northwestern Plains",
     NA_L3NAME %in% c("North Central Hardwood Forests", "Northern Lakes and Forests") ~ "Northern Forests",
@@ -119,100 +116,219 @@ ppr_ecoregions2 <- ppr_ecoregions %>%
     NA_L3NAME %in% c("Western Corn Belt Plains", "Driftless Area") ~ "Western Corn Belt Plains",
     T ~ NA_L3NAME
   ))
-
-# add modified ecoregion to points
-all_samples <- all_samples %>% st_join(ppr_ecoregions2) 
 ```
 
-# Coordinate-based clustering of plots within each ecoregion
+# 2. Pick test surveys
+We selected August 2016, May 2022, and May 2024 as test surveys based on PHDI distributions
 ```{r}
-######################
+testyrs <- c("brood16", "2022", "2024")
+trainyrs_fullppr <- c("2019", "2021", "2023")
+```
 
-# Split by dataset and apply kmeans to each group (k=5)
-clusters5 <- plots %>%
-  st_centroid() %>% 
-  st_join(ppr_ecoregions2, join=st_intersects) %>% 
-  group_by(L3mod) %>% 
-  group_split(L3mod) %>%
-  lapply(perform_kmeans, k=5) 
+# 3. Pick test plots
+Perform coordinate-based clustering of plots within each ecoregion.
+The number of clusters (k) was chosen manually after visually exploring the spatial distribution of plots
+Test clusters were then selected manually based on visual inspection
+Outcome: Selected test plots comprise approximately 14% of all plots
+```{r}
+plots_w_states <- st_join(plots, states)
 
-# Do again but with more groups (a couple ecoregions are too big)
-clusters12 <- plots %>%
-  st_centroid() %>% 
-  st_join(ppr_ecoregions2, join=st_intersects) %>% 
-  group_by(L3mod) %>% 
-  group_split(L3mod) %>%
+#################################################################
+## cluster plots within ecoregions ## 
+
+# Cluster plots within ecoregions (5 clusters)
+clusters5 <- plots |>
+  st_centroid() |> 
+  st_join(ppr_ecoregions_mod, join=st_intersects) |>    #get the ecoregion for a plot's centroid
+  group_by(L3mod) |> 
+  group_split() |>
+  lapply(perform_kmeans, k=5)                          
+
+# Cluster plots within ecoregions (12 clusters - do this bc some ecoregions are too big)
+clusters12 <- plots |>
+  st_centroid() |> 
+  st_join(ppr_ecoregions_mod, join=st_intersects) |> 
+  group_by(L3mod) |> 
+  group_split() |>
   lapply(perform_kmeans, k=12) 
 
-# Finally, do again for MT specifically
-clustersMT <- plots %>%
-  st_centroid() %>% 
-  st_join(ppr_ecoregions2, join=st_intersects) %>% 
-  st_join(states) %>% 
-  filter(STUSPS=="MT") %>% 
-  group_by(L3mod) %>% 
-  group_split(L3mod) %>%
+# Finally, do again for MT specifically (6 clusters)
+clustersMT <- plots_w_states |>
+  st_centroid() |> 
+  st_join(ppr_ecoregions_mod, join=st_intersects) |> 
+  filter(STUSPS=="MT") |> 
+  group_by(L3mod) |> 
+  group_split() |>
   lapply(perform_kmeans, k=6) 
-```
 
-# Pick test plots
-This pulls about 14% of plots
-```{r}
-test_plot_ids_1 <- clusters5 %>% 
-  bind_rows() %>% 
+#################################################################
+## select test clusters for each ecoregion ## 
+
+test_plot_ids_1 <- clusters5 |> 
+  bind_rows() |> 
   filter((L3mod=="Western Corn Belt Plains" & cluster_id==5)
          | (L3mod=="Northern Forests" & cluster_id==4)
-         | (L3mod=="Lake Agassiz Plain" & cluster_id==4))
-
-test_plot_ids_2 <- clusters12 %>% 
-  bind_rows() %>%
-  filter((L3mod=="Aspen Parkland/Northern Glaciated Plains" & cluster_id==6)
-         | (L3mod == "Northwestern Plains" & cluster_id==10))
-
-test_plot_ids_3 <- clustersMT %>% 
-  bind_rows() %>%
-  filter(L3mod == "Northwestern Plains" & cluster_id==1)
-
-test_plot_ids <- bind_rows(
-    test_plot_ids_1, 
-    test_plot_ids_2,
-    test_plot_ids_3
-  ) %>% 
-  distinct(Plot) %>% 
+         | (L3mod=="Lake Agassiz Plain" & cluster_id==4)) |>
+  distinct(Plot) |>
   pull()
+
+test_plot_ids_2 <- clusters12 |> 
+  bind_rows() |>
+  filter((L3mod=="Aspen Parkland/Northern Glaciated Plains" & cluster_id==6)
+         | (L3mod == "Northwestern Plains" & cluster_id==10)) |>
+  distinct(Plot) |>
+  pull()
+
+test_plot_ids_3 <- clustersMT |> 
+  bind_rows() |>
+  filter(L3mod == "Northwestern Plains" & cluster_id==1) |>
+  distinct(Plot) |>
+  pull()
+
+# August 2016 (these are one-off bonus plots, so we gotta do this separately)
+# Here's a manually-selected cluster of hold-out plots from August 2016: 
+test_plots_aug16 <- c(997:1004)
+
+# Combine test plot ids
+test_plot_ids <- c(
+  test_plot_ids_1,
+  test_plot_ids_2,
+  test_plot_ids_3,
+  test_plots_aug16)
 ```
 
-# Split all_samples into testing and training 
+# 4. Cleanup data points
+Wrangling steps include: 
+- I forgot to scale the S2 L1C values to 0-1, do that here 
+- Drop if missing optical data (WE ONLY TRAIN ON UNOCCLUDED IMAGERY - that's because preliminary analysis showed a S1-only model wasn't great)
+- Drop weird artifacts (band values > 1, NA/infinite VIs, etc)
+- Calculate VIs
+- Convert flyvr_d to date type
+- Get a single plot_id col
 ```{r}
-# get test from novel areas and years
-testing <- all_samples %>% 
-  filter(dataset %in% testyrs | plot_id %in% test_plot_ids) 
+# vector of band_cols (we'll need to clean these bands a bit)
+band_cols <- c("blue", "green", "red", "red_edge_1", "red_edge_2", "red_edge_3", "nir", "swir1", "swir2")
 
-# get train data
-training <- all_samples %>% 
+# Combine sf objects
+all_samples <- do.call(bind_rows, shapefiles_list) |> 
+  dplyr::select(-b1) |> 
+  filter(!if_any(all_of(band_cols), ~ .x == -9999)) |>           # drop if missing S2 data
+  mutate(across(all_of(band_cols),                               # rescale S2 L1C values
+                ~ if_else(
+                  dataset %in% c("pair16", "brood16", "pair17", "brood17"), 
+                  .x * 10000, 
+                  .x))
+         ) |>
+  filter(!if_any(all_of(band_cols), ~ .x < 0 | .x > 1)) |>       # drop values outside of 0 to 1
+  filter(!(red==0 & nir==0)) |>                                  # drop this 1 weird row
+  moreVIs() |>                                                   # calculate VIs
+  filter(!is.na(NDRE))  |>                                       # drop this too 
+  filter(!if_any(-geometry, is.infinite)) |>                     # drop rows with infinite values
+  mutate(flyvr_d = as.Date(as.POSIXct(flyvr_d / 1000,            # convert flyvr_d to date
+                                      origin = "1970-01-01",
+                                      tz = "UTC"))) |>  
+  mutate(plot_id = if_else(is.na(plot_id), Plot, plot_id)) |>    # keep only 1 plotid col
+  select(-Plot) |> 
+  filter(!is.na(plot_id))                                        # drop rows with missing plot ids (drops some dubious dry points)
+```
+
+# 5. Get training data
+Get `all_samples` that are NOT within test years or test plots, for training
+```{r}
+training <- all_samples |> 
   filter(!(dataset %in% testyrs | plot_id %in% test_plot_ids)) 
 ```
 
-# Add blocking variable to training set (2 folds per full year, 1 for '16-17)
+# 6. Add modified ecoregion to training data
 ```{r}
-# Split by dataset and apply coordinate-based kmeans to each group 
-training <- training %>%
-  filter(dataset %in% trainyrs_fullppr) %>%
-  group_split(dataset) %>%
-  lapply(perform_kmeans, k=2) %>% 
-  bind_rows() %>% 
-  bind_rows(training %>% filter(!dataset %in% trainyrs_fullppr) %>% mutate(cluster_id=1)) %>% 
-  ungroup() %>% 
+training <- training |> st_join(ppr_ecoregions_mod)  
+```
+
+# 7. Add CV blocking var to training data
+Add blocking variable to training set - we'll use these for cross-validation in model selection
+Use 2 clusters for full survey years (2019, 2021, 2023) and 1 cluster for the smaller survey years (2016-2017)
+Ideally I'd use smaller spatial clusters, because our model doesn't need to be THAT generalizable, but then model selection takes forever
+```{r}
+training <- training |>
+  filter(dataset %in% trainyrs_fullppr) |>
+  group_split(dataset) |>
+  lapply(perform_kmeans, k=2) |> 
+  bind_rows() |> 
+  bind_rows(training |> filter(!dataset %in% trainyrs_fullppr) |> mutate(cluster_id=1)) |> 
+  ungroup() |> 
   mutate(block = paste(cluster_id, "-", dataset)) 
+```
+
+# 8. Add grid id to training data
+Create a grid over the PPR (hexagonal, 51 cells), and add grid_id to the candidate training data. 
+Then, drop grid-surveys with too few observations (we're going to stratify sampling on grid-surveys, and we don't want to oversample the heck out of these areas)
+Note: this needed to be in a projected crs for better area calculation (we used utm14) - WGS created non-equal-area gridcells. Probably should've used something like Albers Equal-Area Conic, but it shouldn't make a difference in the end
+```{r}
+ppr_utm <- ppr |> st_transform(32614)
+plots_utm <- plots |> st_transform(32614)
+
+# create a hexagonal grid over the ppr
+grid <- st_make_grid(ppr_utm, square=F, n=14) 
+index <- which(lengths(st_intersects(grid, plots_utm)) > 0)
+grid_ppr <- grid[index]
+
+# convert the grid to sf
+grid_sf <- grid_ppr |>  
+  st_as_sf() |>
+  mutate(grid_id = row_number()) 
+
+# visualize grid
+ggplot() + 
+  geom_sf(data = ppr_utm, fill = "orange") + 
+  geom_sf(data = grid_sf, fill = NA)
+
+# calculate proportion overlap of each grid cell with the PPR (use a CRS that preserves area better than WGS84)
+intersection <- st_intersection(grid_sf, ppr_utm) 
+intersection$intersect_area <- st_area(intersection) 
+intersection <- intersection |> mutate(grid_area_prop = intersect_area/max(intersect_area))
+intersection <- intersection |> st_drop_geometry() |> select(grid_id, grid_area_prop)
+
+# add grid_id to dataset and its proportion
+training <- training |>  
+  st_join(st_transform(grid_sf, 4326), join = st_intersects) |> # add grid_id
+  left_join(intersection)                                       # add grid_area_prop
+
+# remove grid-surveys with too few obs
+training <- training |> 
+  group_by(dataset, grid_id, type) |> 
+  filter(n() > 30) |> 
+  ungroup()
+```
+
+# 9. Get test plot-surveys
+So for training points, we're pretty sure our wet and dry samples are correctly labeled (as much as HAPET's digitization are correct).
+For testing, we'll use all pixels within plots. Instead of dealing with the sometimes-mislabeled permanent water, I just drop plots-surveys that seem suspect. 
+In the end, there are 128 test plot-surveys... where's 2016
+```{r}
+test_plot_surveys_initial <- all_samples |> 
+  st_drop_geometry() |>  
+  distinct(plot_id, dataset) |> 
+  filter(dataset %in% testyrs & plot_id %in% test_plot_ids) 
+  
+# don't trust HAPET on these
+plot_drop_all  <- c(204, 620)
+plot_drop_2022 <- c(271,824,414,202,803,827,804,746,264,269,312,313) 
+plot_drop_2024 <- c(155, 267)
+
+test_plot_surveys <- test_plot_surveys_initial |> 
+  filter(!plot_id %in% plot_drop_all) |>
+  filter(!(plot_id %in% plot_drop_2022 & dataset=="2022")) |>
+  filter(!(plot_id %in% plot_drop_2024 & dataset=="2024")) 
 ```
 
 # Export training/testing data
 ```{r}
-write.table(test_plot_ids, here("data", "train_test_data", "test_plot_ids.txt"))
+# save test plot-surveys, we'll use this again during model evaluation
+write_csv(test_plot_surveys, here("data", "train_test_data", "test_plot_surveys.csv"))
 
-write_csv(training, here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.csv"), append=F)
-write_csv(testing,  here("data", "train_test_data", "testing", "testing_2wk_200pt.csv"), append=F)
+# save grid
+st_write(grid_sf, here("data", "train_test_data", "grid_sf", "grid_sf.shp"), append=F)
 
+# save training dataset 
 st_write(training, here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.shp"), append=F)
-st_write(testing,  here("data", "train_test_data", "testing", "testing_2wk_200pt.shp"), append=F)
 ```

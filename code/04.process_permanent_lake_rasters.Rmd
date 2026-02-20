@@ -1,16 +1,27 @@
 ---
 title: "Process Permanent Lakes"
 author: Maggie Church
-date: "2024-09-24"
+created: "2024-09-24"
 updated: "2025-02-24"
-output: html_document
 ---
 
-This script reads in the Permanent Lake layer (created in GEE, consists of 6 large tiles) and crops it into 651 rasters that overlay each of our plots.
+**Overview:** The motivation behind this script is that HAPET didn't always digitize permanent lakes. These lakes need to be considered in script #7, which samples dry training points where water was absent. So, we built a "permanent lake" raster in GEE, using the JRC's Global Surface Water product (permanent lakes should be relatively easy to detect, so we trust JRC to get this right). However, GEE-exported raster tiles are large and difficult to work with, so this script breaks them into individual plot-size rasters.
 
-Link to GEE code that creates the Permanent Lake layer [here](https://code.earthengine.google.com/967bd27fac16af729ef93dc1fd53d1e0){.uri}. Note this is EPSG=32614 (UTM 14N)
+**Inputs**:
 
-# Setup environment and load libraries
+-   Plot boundary shapefile (script #1)
+
+-   Permanent lake raster tiles (link to GEE code that creates the Permanent Lake layer [here](https://code.earthengine.google.com/967bd27fac16af729ef93dc1fd53d1e0){.uri})
+
+**Steps**:
+
+1.  Crop the tiled rasters into 651 rasters - one for each plot
+
+**Outputs:**
+
+-   651 permanent lake rasters, saved in `data/intermediate/rasterprocessing/cropped_permWater_rasters`
+
+# Load libraries
 ```{r}
 library(sf)
 library(dplyr)
@@ -24,25 +35,24 @@ utm14 <- 32614
 w <- detectCores()
 ```
 
-# 1. Break permanent lake raster tiles into plot-size rasters
-
-Load plot boundaries and apply buffer.
+# Load plot boundaries
+Apply inward plot buffer, because we're not going to sample any training points at plot edges. This is quick.
 ```{r}
 # read in plot boundary data
 plots <- 
-  st_read(here("data", "allPlots")) %>%
+  st_read(here("data", "allPlots")) |>
   st_transform(utm14)
 
 # apply inwards plot buffer 
 plots_inbuff75 <- st_buffer(plots, -7.5)
 ```
 
-This next chunk creates the function we'll use to split these tiles up. If a plot covers multiple tiles, crops from each tile are merged to cover full plot extent.
-
-p is a plot id
-rasters is a list of large rasters
+# Function to split tiles
+This next chunk creates the function we'll use to crop the larger Permanent Lake tiles into smaller plot-size tiles. If a plot covers multiple tiles, crops from each tile are merged to cover full plot extent.
 ```{r}
-# Function to crop raster tiles by plots
+# Function to crop raster tiles by plots 
+#    p is a plot id
+#    rasters is a list of large rasters
 crop_raster <- function(p, rasters) {
   
   # Get the extent for the current plot by filtering the plot_id
@@ -90,7 +100,8 @@ crop_raster <- function(p, rasters) {
 }
 ```
 
-Now we run the function! I use parallel processing to speed things up... this part only takes a few minutes.
+# Run the function
+Now we run the function! I use parallel processing to speed things up... this part only takes a few minutes. Note the permanent lake layer is EPSG=32614 (UTM 14N)
 ```{r}
 # Get unique plot IDs
 plot_ids <- unique(plots_inbuff75$Plot)

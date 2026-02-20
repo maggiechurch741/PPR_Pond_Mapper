@@ -1,0 +1,206 @@
+---
+title: "Training Curve Analysis"
+author: "Maggie Church"
+created: "2025-06-02"
+updated: "2025-02-24"
+---
+
+**Description**: This script builds a training curve on the candidate training points. We do this to see how much training data we'll need for our model (we don't want too much or too little). 
+
+**Inputs:**
+
+-   PPJV administrative boundary
+
+-   Candidate training data (created in script #8)
+
+**Steps:** 
+
+-   1. Prep the data for mlr3
+
+-   2. Get learning curve data: train the model with sequentially more and more training data. Use the training sample design outlined in script #10, and spatiotemporally-aware cross-validation for model fitting/evaluation. 
+
+**Outputs:**
+
+-   Training curve results
+
+**Note 1:** we don't tune the model features or hyperparameters.
+**Note 2:** this takes a realllllyyyy long time and takes a looottt of memory. It fits 270 different models (10 x 9 x 3). Probably best run in an HPC. 
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(sf)
+library(here)
+library(caret)
+library(pROC)
+library(future)
+library(future.apply)
+library(parallelly)
+```
+
+# Load data and helper function
+```{r, message=F}
+# load training data
+training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.shp")) |>
+  rename(grid_area_prop = grd_r_p) #this got truncated in the export
+
+# load PPR boundary
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> st_transform(32614)
+
+# Load help function to perform spatiotemporal sampling
+source(here("code", "helper_functions", "sptm_sample.R"))
+```
+
+# 2. Prep training data for training curve analysis
+Create a vector of our candidate features, prep our training data for mlr3
+```{r}
+# full featureset (we'll use this later)
+featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
+                "sp30d_2","red","sp30d_1","nir","wt30_10","VVVH_rt",
+                "wt90_10","green","z_2","NDWI","z_1","ABWI","h90_100","VH",
+                "TCB","NDMI1","blue","h30_100","mNDWI2","mNDWI1","TCG",
+                "rd_dg_1","z","rd_dg_2","rd_dg_3","NDPI","BU3","AWEI",
+                "AWEISH","BSI","DVW","DVI","IFW","IPVI","MIFW","OSAVI","SAVI",
+                "RVI","TVI","WRI","WTI", "VARI", "BGR", "GRR", "RBR", "SRBI", "NPCRI",
+                "EVI3b", "EVI2b")  
+
+# prep training data
+training <- training |>
+  st_drop_geometry() |> 
+  mutate(type = as.factor(type)) |>
+  mutate(grid_area_prop = as.numeric(grid_area_prop))
+```
+
+# 3. Get learning curve data 
+Run this in parallel:
+ *  Sample (stratified) from candidate training data, taking increasingly higher proportions of data from the full training set: 1%, 6%, 11% ... up to 46%
+ *  For each proportion slice, fit an RF model on 8 of the 9 spatiotemporally-aware folds (created in script #8), optimizing for AUC
+ *  Evaluate test AUC on held-out fold 
+ *  Redo this 3 times per proportion slice-fold, selecting different training data each time
+```{r, eval=F}
+# set up parallel processing (careful, this is quite memory-intensive)
+w <- parallelly::availableCores()
+future::plan("multisession", workers=2)
+
+# Grid of lappy parameters
+props <- seq(.01, 0.46, by=0.05)  # 10 proportions (start with 1% of data, 6%, 11%, ... up to 46%)
+folds <- unique(training$block)   # 9 folds
+reps <- 1:3                       # 3 repetitions
+params <- expand.grid(f = folds, p = props, r = reps) 
+
+# run in parallel
+results <- future_lapply(1:nrow(params), function(idx) {
+  
+  f <- params$f[idx]        # fold (for train-test split)
+  p <- params$p[idx]        # proportion
+  r <- params$r[idx]        # repetition
+
+  tryCatch({
+    
+    # Set a new seed for each fold
+    set.seed(1000 + r * 10 + round(p * 10000)) 
+    
+    # Split by block 
+    test_data  <- training |> filter(block == f)    # set aside 1 fold for test
+    train_pool <- training |> filter(block != f)    # sample from the other 8
+
+    # Get number of rows in training data
+    n_train_pool <- nrow(train_pool)
+
+    # Get number of grid-data strata, weighted by grid_area_prop
+    weighted_nstrata <- train_pool |>
+      distinct(grid_id, dataset, grid_area_prop) |>
+      summarize(sum(grid_area_prop)) |> 
+      pull()
+
+    # Get n. We'll sample n x p per strata
+    n <- floor(n_train_pool / weighted_nstrata * p)
+
+    # Sampling from train_pool data (stratify by class, grid_id, and survey)
+    sample <- sptm_sample(train_pool, n_per_cell = n) 
+
+    # Prep sample for ml3
+    train_data <- sample |> select(all_of(featureset), type)
+
+    # Each class could be present within each grid-survey sample, but just in case: 
+    if (length(unique(train_data$type)) < 2 || length(unique(test_data$type)) < 2) {
+      warning(sprintf("Skipping fold %d, prop %.3f: only one class present", f, p))
+      return(tibble(fold = f, proportion = p, training_n = nrow(train_data), ROC_AUC = NA_real_))
+    }
+
+    # train a model on the training sample
+    model <- train(
+      type ~ .,
+      data = train_data,
+      method = "rf",
+      metric = "ROC",
+      trControl = trainControl(
+        method="none",
+        classProbs = TRUE,
+        summaryFunction = twoClassSummary
+      )
+    )
+
+    # apply the model to the test set
+    probs <- predict(model, test_data, type = "prob")[, 2]
+
+    # get test accuracy
+    roc_auc <- roc(response = test_data$type, predictor = probs)$auc
+
+    # return results
+    tibble(fold = f, 
+           rep = r,
+           proportion = p, 
+           training_n = n_train_pool,
+           ROC_AUC = as.numeric(roc_auc))
+
+  }, 
+  
+  # if this run fails for some reason, print a warning and move on
+  error = function(e) {
+    warning(sprintf("fold %d, prop %.3f failed: %s", f, p, e$message))
+    return(tibble(fold = f, proportion = p, training_n = NA_integer_, ROC_AUC = NA_real_))
+  })
+
+}, future.seed = TRUE) |> bind_rows()
+
+# turn off parallel processing
+future::plan("sequential")
+```
+
+
+```{r}
+summary_results <- results |>
+  group_by(proportion) |>
+  summarise(
+    mean_n = mean(training_n, na.rm=T),
+    mean_auc = mean(ROC_AUC, na.rm = TRUE),
+    sd_auc = sd(ROC_AUC, na.rm = TRUE),
+    se_auc = sd_auc / sqrt(n()),
+    lower_ci = mean_auc - 1.96 * se_auc,
+    upper_ci = mean_auc + 1.96 * se_auc,
+    .groups = "drop"
+  )
+
+ggplot(summary_results, aes(x = mean_n, y = mean_auc)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.2, fill = "blue") +
+  geom_point(color = "blue", size = 2) +
+  labs(
+    title = "Learning Curve",
+    subtitle = "Mean test AUC across 10 resamples. Dataset was spatiotemporally stratified, then split into 80-20 train/test splits.",
+    x = "Training Data Size",
+    y = "Mean AUC (with 95% CI)"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+Ok performance seems to top-out at the 41% of training mark. How many samples is that per cell-survey? ==> ~750
+```{r}
+floor(nrow_training / ngroups * 0.41)
+```
+
+```{r}
+# save training curve results
+write_csv(results, here("data/learning_curve_results/learning_curve_results_updated.csv"))
+```

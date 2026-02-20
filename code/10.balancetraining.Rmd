@@ -1,0 +1,74 @@
+---
+title: "Balance Training Data"
+author: "Maggie Church"
+created: "2024-10-12"
+updated: "2025-02-24"
+---
+
+**Description**: This script selects final training points from the candidate training data by stratifying over time and space. 
+
+**Inputs:**
+
+-   PPJV administrative boundary
+
+-   Candidate training data (created in script #8)
+
+**Steps:** 
+
+-   Balance training data spatiotemporally: draw 750 water and 750 nonwater points, from each grid-survey (750 was informed by the training curve from script #9)
+
+**Outputs:**
+
+-   Final training dataset
+
+# Load libraries
+```{r, message=F}
+library(tidyverse)
+library(sf)
+library(here)
+
+set.seed(123)
+```
+
+# Load data and helper function
+```{r, message=F}
+# Load PPR boundary
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> 
+  st_transform(32614)
+
+# Load candidate training data
+training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.shp")) |> 
+  st_transform(32614)
+
+# Load help function to perform spatiotemporal sampling
+source(here("code", "helper_functions", "sptm_sample.R"))
+```
+
+
+## Balance dataset
+My goal is to balance samples spatially across the "grid," and temporally within each discrete survey period. Basically, I don't want to over-train in one region/period. Remaining data gaps include:
+-   W. MT has none 2019
+-   2016-2017 is ND-only
+```{r}
+# sample each cell-survey: weight by spatial coverage of that survey (see dataset_weights df), and proportion of much of the gridcell is inside the ppr. Ensure even wet-dry sampling
+balanced_training <- sptm_sample(training, n_per_cell = 750) |>
+  # remove cells where there were no wet points
+  group_by(dataset, grid_id) |> 
+  filter(!is.na(sum(type=="wet")) & sum(type=="wet") > 0) |> 
+  ungroup() 
+
+# some light cleanup
+balanced_training_clean <- balanced_training |>
+  # remove cells where there were no wet points
+  group_by(dataset, grid_id) |> 
+  filter(!is.na(sum(type=="wet")) & sum(type=="wet") > 0) |> 
+  ungroup()  |>
+  # remove these sneaks, too
+  filter(!is.na(NDRE) & !is.na(NDMI2))
+```
+
+# Export
+Write balanced training dataset to  csv, because it's way easier to deal with in the next scripts (which I run on an HPC)
+```{r}
+write_csv(balanced_training_clean, here("data", "train_test_data", "balanced_training", "training_2wk_200pt_bal.csv"))
+```

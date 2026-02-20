@@ -1,45 +1,37 @@
 ---
 title: "Sample Dry Points"
 author: Maggie Church
-date: "2024-09-24"
+created: "2024-09-24"
 updated: "2025-02-24"
-output: html_document
 ---
 
-**Description**: Limit the Possibility Layer to known dry areas (not wet in HAPET, and not a permanent water body). We will randomly sample dry points from within this area, to train the model what is dry.
+**Description**: This script randomly samples 200 nonwater points per plot-survey. That is, we sample within the "possibility" layer where there's no known water (based on HAPET and JRC's GSW). This outputs 735k nonwater points, which I then upload to GEE to extract their predictors. 735k is way too many for training, but we wanted more than enough in case some were cloud-occluded.
 
-The output of this is a shapefile of sampled dry points - we'll use this to split train/test, and extract remotely-sensed features.
+**Inputs:**
+
+-   Cleaned, out-buffered HAPET pond shapefile (script #3)
+
+-   State boundary shapefile
+
+-   Plot-sized permanent lake rasters (script #4)
+
+-   Plot-sized "possibility" rasters (script #5)
 
 **Steps:** For a given plot:
 
-1.  load possibility raster for that plot
+1.  Build function to sample nonwater points per plot-survey: load possibility raster for the plot --> mask edges of possible wetlands --> mask HAPET ponds for that plot-survey --> mask permanent water --> randomly sample from within the resulting dry ROI.
 
-```{r, echo=FALSE}
-knitr::include_graphics(here("figures", "dry_sampling_steps_plot262", "1.poss.png"))
-```
+2.  Run the function: get 200 nonwater points per plot-survey
 
-2.  remove edges
+3. Add state attribute
 
-    ![](images/2.poss_remove_edges-01.png){width="198"}
+**Outputs:**
 
-3.  get ponds
+-  A shapefile of water points, saved in `data/intermediate/sampled_coordinates/dry_200.shp`
 
-    ![](images/3.ponds.png){width="208"}
+**Note:** If I could go back in time and use "nonwater" instead of "dry," I would. But I don't want to mess with that now. 
 
-4.  get permanent water
-
-    ![](images/4.permWater-01.png){width="208"}
-
-5.  mask ponds and permanent water from possibility layer
-
-    ![](images/5.dryROI-01.png){width="198"}
-
-6.  randomly sample points within this dry ROI
-
-    ![](images/6.sampled_points-01.png){width="191"}
-
-## Load packages:
-
+## Load libraries
 ```{r, message=F, warning=F}
 library(tidyverse)
 library(sf)
@@ -47,7 +39,7 @@ library(terra)
 library(future.apply)
 library(parallel)
 library(tools)
-library(mapview)
+library(here)
 
 w <- detectCores()
 
@@ -55,22 +47,20 @@ utm14 <- 32614
 wgs <- 4326
 ```
 
-## Load HAPET pond boundaries and apply a 7.5m buffer.
-
+## Load data
 ```{r, message=F, warning=F}
-# read in preprocessed and combined HAPET data
-allPonds <- st_read(here("data", "allPonds"))
+# Load out-buffered HAPET data
+ponds_outbuff75 <- st_read(here("data", "intermediate", "buffered_ponds", "allPonds_outbuff75.shp"))
 
-# apply 15m outward buffer to ponds
-ponds_outbuff75 <- st_buffer(allPonds, 7.5)
+# Load state shapefile
+states <- st_read(here("data", "boundaries", "states"))
 
 # List raster files
 cropped_poss_files <- list.files(here("data", "intermediate", "raster_processing", "cropped_poss_rasters"), full.names = TRUE) 
 cropped_permWater_files <- list.files(here("data", "intermediate", "raster_processing", "cropped_permWater_rasters"), full.names = TRUE) 
 ```
 
-## create fn to remove known wet areas from possibility layer -\> sample dry points.
-
+## 1. Create fn to remove known wet areas from possibility layer, then sample dry points
 ```{r}
 # Define a function to process each plot
 sample_dry <- function(p, d) {
@@ -89,40 +79,41 @@ sample_dry <- function(p, d) {
   poss_i <- as.numeric(poss_i == 1)  
   poss_i <- mask(poss_i, poss_i, maskvalue = FALSE)  # Convert 0 to NA
   
-  # 3. Get the ponds for this plot
+  # 3. Remove actively wet areas from the possibility raster for this plot
+  # Get the ponds for this plot
   ponds_i <- filter(ponds_outbuff75, dataset == d & Plot == p)
   
-  # 4. Get the permanent water for this plot
+  # Get the permanent water for this plot
   perm_file <- grep(paste0("_", p, "\\.tif$"), cropped_permWater_files, value = TRUE)
   
   # Snap permanent water raster to poss_i -- add a 30m buffer too
-  perm_i <- perm_file %>%
-      rast() %>%        
+  perm_i <- perm_file |>
+      rast() |>        
       resample(poss_i) 
   
   # Convert 0 to NA
   perm_i <- mask(perm_i, perm_i, maskvalue = FALSE)   
   
   # add 30m buffer to the permanent water raster
-  perm_i <- perm_i %>% focal(w = matrix(1, 7, 7), fun = max, na.rm = TRUE) 
+  perm_i <- perm_i |> focal(w = matrix(1, 7, 7), fun = max, na.rm = TRUE) 
   
   # Add some areas that the perm water layer missed (I created this layer manually)
-  perm_more <- st_read(here("data", "intermediate", "jrc_missed")) %>% 
+  perm_more <- st_read(here("data", "intermediate", "jrc_missed")) |> 
     st_transform(st_crs(perm_i)$wkt)
 
-  # 5. Remove actively wet areas from the possibility raster for this plot
-  dryROI_subset <- poss_i %>%
-    mask(ponds_i, inverse = TRUE) %>% 
-    mask(perm_i, inverse = TRUE) %>% 
+  # Mask water
+  dryROI_subset <- poss_i |>
+    mask(ponds_i, inverse = TRUE) |> 
+    mask(perm_i, inverse = TRUE) |> 
     mask(perm_more, inverse = TRUE) 
   
-  # 6. Sample points (200 per plot-year)
+  # 4. Sample points (200 per plot-year)
   sampled_points <- 
     spatSample(dryROI_subset, 
                size = 200, 
                method = "random", 
                na.rm = TRUE, 
-               as.points = TRUE) %>%
+               as.points = TRUE) |>
       st_as_sf()
   
   # If no points were sampled, return NULL
@@ -140,10 +131,8 @@ sample_dry <- function(p, d) {
 }
 ```
 
-## Run function
-
-Btw plots 914 and 945 are missing from the possibility rasters... They're outside of the PPJV boundary.
-
+## 2. Run function
+Btw plots 914 and 945 are missing from the possibility rasters because they're outside of the PPJV boundary.
 ```{r}
 set.seed(123)
 
@@ -154,17 +143,17 @@ plan(multisession, workers = w-2)
 all_sampled_points_list <- list()
 
 # get the dataset names
-datasets <- ponds_outbuff75 %>% st_drop_geometry() %>% distinct(dataset) %>% pull()
+datasets <- ponds_outbuff75 |> st_drop_geometry() |> distinct(dataset) |> pull()
 
 # Use lapply to apply the process to all plots, within a given dataset d
 for (d in datasets) {
 
   # Plots surveyed in dataset d
-  plots_d <- ponds_outbuff75 %>%
-    filter(dataset == d) %>%
-    pull(Plot) %>%
-    unique() %>%
-    na.omit() %>%
+  plots_d <- ponds_outbuff75 |>
+    filter(dataset == d) |>
+    pull(Plot) |>
+    unique() |>
+    na.omit() |>
     as.vector()
   
   # Sample dry points for this dataset
@@ -176,36 +165,25 @@ for (d in datasets) {
 }
 
 # combine the results into one sf object
-###### this is throwing an error
 dryPoints_sf <- bind_rows(all_sampled_points_list, .id = "dataset")
 
-# Reset the plan to sequential (no parallelization)
+# Reset the plan to sequential
 plan(sequential)
 ```
 
+# 3. Add state info
 ```{r}
 # Get state info
-states <- st_read(here("data", "boundaries", "states")) %>%
-  st_transform(utm14) %>% 
+states <- states |>
+  st_transform(utm14) |> 
   select(STATEFP, STUSPS)
 
 # Add state info to points
-dryPoints_sf_wstate <- dryPoints_sf %>%
-  st_join(states) %>%  # add state info
+dryPoints_sf_wstate <- dryPoints_sf |>
+  st_join(states) |>  # add state info
   st_transform(wgs)    # set to WGS before exporting
-
-st_write(dryPoints_sf_wstate, here("data", "intermediate", "sampled_coordinates", "dry.shp"), append=FALSE)
 ```
 
-```{r, echo=F, eval=F}
-p = 262
-  
-# make figures
-mapview(poss, col.regions='#fae479')
-mapview(poss, col.regions='#fae479') + mapview(ponds, legend=F)
-mapview(poss, col.regions='#fae479') + mapview(perm, legend=F, col.regions="navy", na.color="transparent")
-mapview(dryROI_subset, col.regions='#fae479')
-mapview(dryROI_subset, col.regions='#fae479') + mapview(sampled_points, alpha=1, cex=5)
+```{r}
+st_write(dryPoints_sf_wstate, here("data", "intermediate", "sampled_coordinates", "dry_200.shp"), append=FALSE)
 ```
-
-Next, I upload the exported dry points to GEE to extract their predictors, then save those results at PPR/samplePoints/data/inputs.
