@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# ignore everything in a folder
+archive/
+figures/
+misc/
+ver2/
