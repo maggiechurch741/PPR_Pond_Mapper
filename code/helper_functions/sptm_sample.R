@@ -5,7 +5,7 @@ sptm_sample <- function(df, n_per_cell){
     group_by(type, grid_id, dataset) |>
     group_modify(~ {
       # determine number of wet & dry rows to sample for this grid-survey
-      n <- round(n_per_cell * .x$grid_area_prop[1] / 2)
+      n <- round(n_per_cell * .x$grid_area_prop[1])
       
       # sample without replacement for all grid-surveys
       base_sample <- slice_sample(.x, n=n, replace=FALSE) 
