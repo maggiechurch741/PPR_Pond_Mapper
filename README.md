@@ -6,7 +6,7 @@ The Prairie Pothole Mapper is an open-source tool for **monitoring surface water
 
 To use the tool, visit [GEE link](https://code.earthengine.google.com/2f358b4afc3a98f4a21105bf6b5d68dc). Simply select your area and timespan of interest then click "Run" to generate predictions.
 <p float="center">
-  <img src="code/images/gee_screenshot_setup.png" width="300" />
+  <img src="images/gee_screenshot_setup.png" width="300" />
 </p>
 
 <br/>
@@ -14,7 +14,7 @@ To use the tool, visit [GEE link](https://code.earthengine.google.com/2f358b4afc
 Export to your Google Drive to explore the resulting raster in your preferred software.
 
 <p float="center">
-  <img src="code/images/gee_screenshot_export.png" width="300" />
+  <img src="images/gee_screenshot_export.png" width="300" />
 </p>
 
 <br/>
@@ -37,7 +37,7 @@ Below is an example of what full-month coverage looks like across the U.S. PPR:
 </p>
 
 <p align="center">
-<img src="code/images/month_cloud_coverage.png"
+<img src="images/month_cloud_coverage.png"
   alt="Monthly Cloud Coverage" 
   width="400"/>
 </p>
@@ -65,14 +65,14 @@ These sources were combined in Google Earth Engine to generate a wetland footpri
 
 <p align="center">
 <strong>Wetland footprint sources (white areas indicate wetland evidence)</strong><br>
-<img src="code/images/WetlandFootprint.png" 
+<img src="images/WetlandFootprint.png" 
      alt="Wetland footprint sources"
      width="800"/>
 </p>
 
 <p align="center">
   <strong>Historic wetland footprint of an area in Minnesota</strong><br>
-  <img src="code/images/MN_PossibilityLayer.png" 
+  <img src="images/MN_PossibilityLayer.png" 
     alt="Historic Wetland Footprint of a Portion of MN"
     width="400"/>
 </p>
@@ -120,7 +120,7 @@ In Google Earth Engine, we extracted candidate features to each sampled point:
 We held out data from August 2016, May 2022, and May 2024, so that both model training and evaluation represented a range of climate conditions  to evaluate model performance across a range of climatic conditions.
 
 <div align="center" style="width: 500px; margin: 0 auto;">
-   <img src="code/images/test_train_plots.png" 
+   <img src="images/test_train_plots.png" 
       alt="Temporal Train-Test Split" 
       width="400"/>
   <p style="margin-top: 6px;">
@@ -134,7 +134,7 @@ We also held out clusters of plots located in distinct Level III ecoregions, to 
 
 
 <div align="center" style="width: 500px; margin: 0 auto;">
-  <img src="code/images/test_train_surveys.png" 
+  <img src="images/test_train_surveys.png" 
        alt="Spatial Train-Test Split" 
        width="400"/>
   <p style="margin-top: 6px;">
