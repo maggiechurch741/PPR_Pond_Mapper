@@ -38,7 +38,8 @@ ppr <- st_read(here("data", "boundaries", "PPJV")) |>
 
 # Load candidate training data
 training <- st_read(here("data", "train_test_data", "unbalanced_training", "training_2wk_200pt.shp")) |> 
-  st_transform(32614)
+  st_transform(32614) |>
+  rename(grid_area_prop = grd_r_p) #this got truncated in the export
 
 # Load help function to perform spatiotemporal sampling
 source(here("code", "helper_functions", "sptm_sample.R"))
@@ -70,5 +71,5 @@ balanced_training_clean <- balanced_training |>
 # Export
 Write balanced training dataset to  csv, because it's way easier to deal with in the next scripts (which I run on an HPC)
 ```{r}
-write_csv(balanced_training_clean, here("data", "train_test_data", "balanced_training", "training_2wk_200pt_bal.csv"))
+write_csv(balanced_training_clean, here("data", "train_test_data", "balanced_training", "training_bal.csv"))
 ```

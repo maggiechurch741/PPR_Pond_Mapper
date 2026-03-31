@@ -1,0 +1,215 @@
+---
+title: "Fig 8: PHDI"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(cowplot)
+```
+
+```{r}
+plots <- st_read(here("data", "allPlots")) |> st_transform(4269)
+
+ppr <- st_read(here("data", "boundaries", "PPJV"))
+
+test_plot_ids <- read_csv(here("data/train_test_data/test_plot_surveys_stratified.csv")) |> 
+  distinct(Plot) |>
+  pull()
+
+training <- read_csv(here("data", "train_test_data", "balanced_training", "training_bal.csv")) 
+
+# May and Aug PHDI downloaded from NOAA:
+# https://www.ncei.noaa.gov/access/monitoring/climate-at-a-glance/divisional/mapping/110/phdi/202205/1/value
+source(here("code/analysis/helper_functions/get_phdi.R"))
+```
+
+Get the PHDI for all datasets: Unlist into a single dataframe
+```{r}
+phdi <- 
+  do.call(rbind, lapply(names(phdi_data_list), function(n) {
+    cbind(source = n, processed_phdi_list[[n]])
+  })) |> 
+  mutate(source = str_remove(source, "^phdi_")) |> 
+  filter(source %in% c("aug16", "aug17", "may16", "may17", "may19", "may21", "may22", "may23", "may24")) |> 
+  mutate(test = if_else(source %in% c("aug16", "may22", "may24"), "Test Survey", "Train Survey")) |> 
+  mutate(month = substr(source, 1, 3) |> str_to_sentence(),
+         year = paste0("20", substr(source, 4, 5)),
+         month_year = paste(month, year))
+```
+
+Get 1 row per plot-survey
+```{r}
+phdi_plots <- st_join(phdi, plots) |> 
+  st_drop_geometry() |>
+  mutate(PHDI = as.numeric(PHDI))
+
+test_phdi <- phdi_plots  |>
+  filter(Plot %in% test_plot_ids & test=="Test Survey") |>
+  filter((Plot > 995 & month_year == "Aug 2016") |
+         (Plot < 995 & month_year != "Aug 2016")  
+         ) |> 
+  group_by(Plot, month_year) |> 
+  summarize(PHDI = mean(PHDI)) |> 
+  mutate(test="Test Plot")
+
+# get train plots
+training_plots <- 
+  training |> 
+  st_drop_geometry() |> 
+  mutate(
+    source = case_when(
+      grepl("^brood", dataset) ~ paste0("aug",  sub("brood", "", dataset)),
+      grepl("^pair",  dataset) ~ paste0("may",  sub("pair",  "", dataset)),
+      grepl("^[0-9]{4}$", dataset) ~ paste0("may", substr(dataset, 3, 4)),
+      TRUE ~ dataset    
+      )
+  ) |>
+  distinct(source, Plot=plot_id)
+
+train_phdi <- phdi_plots |> 
+  st_drop_geometry() |>
+  inner_join(training_plots) |> 
+  group_by(Plot, month_year) |> 
+  summarize(PHDI = mean(PHDI)) |> 
+  mutate(test="Train Plot")
+  
+phdi <- bind_rows(test_phdi, train_phdi)
+```
+
+
+# Weighted jitterplot
+Spreads points based on density so clusters are clearer
+```{r}
+a <- phdi |>
+  ggplot(aes(x = month_year, y = PHDI, color=test)) +
+  ggbeeswarm::geom_quasirandom(alpha = 0.5) + 
+  geom_hline(aes(yintercept = 0), linetype="dashed", alpha=0.5) + 
+  labs(
+    x = "Survey Period",
+    color=NULL) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=16),
+        axis.text.y = element_text(size=18),
+        axis.title = element_text(size=18),
+        legend.text = element_text(size = 18),
+        plot.subtitle = element_text(size = 18)) 
+```
+
+# Test county PHDI map
+```{r}
+# Function to plot selected datasets with a shared fill legend
+plot_phdi_data <- function(dataset_names = NULL, fill_limits=NULL, ncol=2) {
+  
+  # If no dataset names are provided, use all datasets
+  if (is.null(dataset_names)) {
+    dataset_names <- names(processed_phdi_list)
+  }
+  
+  # Function to convert dataset name (e.g., 'phdi_may16') to a readable title (e.g., 'May 2016')
+  format_title <- function(name) {
+    month_year <- sub("phdi_", "", name)                       # Remove 'phdi_'
+    month_year <- gsub("([a-zA-Z]+)([0-9]{2})", "\\1 20\\2", month_year)  # Separate month/year
+    month_year <- paste0(toupper(substr(month_year, 1, 1)),    # Capitalize first letter
+                         substr(month_year, 2, 3),             # Keep rest of month as-is
+                         substr(month_year, 4, nchar(month_year))) # Append year part
+    return(month_year)
+  }
+  
+  # Filter the datasets to include only the selected ones
+  selected_datasets <- processed_phdi_list[dataset_names]
+  
+  # Get county footpring
+  county_sf <- processed_phdi_list[["phdi_may22"]]$geometry
+  
+  # Generate plots without legends
+  plots <- lapply(names(selected_datasets), function(name) {
+      ggplot() + 
+      geom_sf(data = st_transform(ppr, 32614),
+              fill = "white", color = "grey40", linewidth = 0.3) +
+      geom_sf(data = st_transform(county_sf, 32614),
+              fill = "grey85", linewidth = 0.2) +
+      geom_sf(data = st_transform(selected_datasets[[name]], 32614), 
+              aes(fill = PHDI),
+              linewidth = 0.2) +
+      scale_fill_gradientn(
+        colors = c("#38200e", "#814b22", "#dc8039", "white", "#c2f6ed", "#59c1af", "#387e71", "#065244", "#00342a"),
+        values = scales::rescale(c(-6, -4, -2, 0, 2, 4, 6, 8, 10)),
+        limits = fill_limits,
+        oob = scales::squish,
+        na.value = "grey85"
+      ) + 
+      theme_minimal() + 
+      theme(legend.position = "none", 
+            axis.text.x = element_text(angle = 45, hjust = 1),
+            axis.text = element_text(size = 14), 
+            plot.title = element_text(size = 18, face = "bold", hjust = 0.5) 
+      ) +
+      labs(title = format_title(name))
+  })
+  
+  # Create a reference plot to extract the shared legend
+  ref_plot <- ggplot() + 
+    geom_sf(data = selected_datasets[[1]], aes(fill = PHDI)) + 
+    scale_fill_gradientn(
+      colors = c("#38200e", "#814b22", "#dc8039", "white", "#c2f6ed", "#59c1af", "#387e71", "#065244", "#00342a"),
+      values = scales::rescale(c(-6, -4, -2, 0, 2, 4, 6, 8, 10)),
+      limits = fill_limits,
+      name = "PHDI"
+    ) + 
+    theme_minimal() + 
+    theme(
+      legend.position = "right",
+      legend.text  = element_text(size = 14), 
+      legend.title = element_text(size = 16)   
+    ) + 
+    theme(legend.position = "right") 
+  
+  # add key for NA
+  add_na_key <- function(p, label = "NA", col = "grey85") {
+    p +
+      ggnewscale::new_scale_fill() +
+      geom_point(aes(x = Inf, y = Inf, fill = label), inherit.aes = FALSE,
+                 shape = 22, size = 4, show.legend = TRUE) +
+      scale_fill_manual(NULL, values = setNames(col, label))
+  }
+  ref_plot <- add_na_key(ref_plot)
+  
+  # Extract the legend
+  legend <- get_legend(ref_plot)
+  
+  # Arrange plots with the shared legend
+  plot_grid(plot_grid(plotlist = plots, ncol = ncol, align = "hv"), 
+            legend, 
+            rel_widths = c(3, 0.3))
+}
+
+
+b <- plot_phdi_data(dataset_names = c("phdi_aug16", "phdi_may22", "phdi_may24"), fill_limits=c(-6, 6), ncol=3)
+```
+
+Draw together
+```{r}
+p <- plot_grid(
+  ggdraw(a) + draw_plot_label("a", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold"),
+  ggdraw(b) + draw_plot_label("b", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold"),
+  ncol = 1,
+  rel_heights = c(450, 350)
+)
+
+p
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_08.png"),
+       plot = p,
+       width = 1000/96, 
+       height = 750/96, 
+       units = "in",
+       dpi = 1000,
+       bg = "white")  
+```

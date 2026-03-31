@@ -1,0 +1,167 @@
+---
+title: "Get IOU results"
+author: "Maggie Church"
+date: "2026-03-25"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(terra)
+library(sf)
+```
+
+```{r}
+all_sf <- st_read(here("data/accuracy_assessment/all_est_obs_clouds/all_est_obs_clouds.shp"))
+```
+
+```{r}
+# Split into observed and estimated by product
+ponds_obs   <- all_sf |> filter(type == "observed")
+ponds_est   <- all_sf |> filter(grepl("estimated", type))
+clouds      <- all_sf |> filter(grepl("clouds", type))
+
+product_map <- c(
+  postproc10 = "estimated_ours",
+  dswe_cons  = "estimated_cons",
+  dswe_agg   = "estimated_agg",
+  dw         = "estimated_dw",
+  jrc        = "estimated_jrc"
+)
+
+clouds_type_map <- c(
+  postproc10 = "clouds_ours",
+  dswe_cons  = "clouds_cons",
+  dswe_agg   = "clouds_agg",
+  dw         = "clouds_dw"
+)
+```
+
+Looootsss of debugging went into this
+```{r}
+compute_ious <- function(obs, pred, clouds, source_name, ds) {
+  
+  obs  <- obs  |> st_make_valid() |> st_cast("POLYGON")
+  pred <- pred |> st_make_valid() |> st_cast("POLYGON")
+  
+  # mask clouds from observed ponds (except for jrc which has no clouds)
+  # now "obs" will only contain cloudless or partially clouded ponds 
+  cloud_type <- clouds_type_map[source_name] |> unname() #get cloud product name
+  
+  if (!is.na(cloud_type) && !is.null(clouds)) { 
+    # create cloud mask
+    cloud_mask <- clouds |>
+      filter(type == cloud_type) |>
+      st_union() |>
+      st_make_valid() 
+    
+    if (length(cloud_mask) > 0) {
+      obs <- obs |>
+        # remove clouds
+        st_difference(cloud_mask) |>
+        # Keep only non-empty geometries
+        st_make_valid() |>   
+        filter(!st_is_empty(geometry)) |>
+        st_collection_extract("POLYGON") |> 
+        #st_collection_extract("POLYGON", warn = FALSE) |>
+        # unionize ponds that got split by clouds 
+        group_by(Plot, rownum) |>   
+        summarise(geometry = st_union(geometry),
+                  pond_size = first(pond_size)) |>  
+        ungroup() 
+    }
+  }
+  
+  if (nrow(obs) == 0) return(tibble())
+  
+  # Precompute spatial intersections (faster)
+  intersection_index <- st_intersects(obs, pred)
+  
+   # initialize empty vector where nrow = number of observed ponds
+  iou_vals <- numeric(nrow(obs))
+  
+  # for each obs pond that intersects an estimated pond(s), calculate iou
+  for (i in seq_len(nrow(obs))) {
+    
+    # get estimated ponds that intersect this observed pond
+    idx <- intersection_index[[i]]
+    
+    # if there's an overlapping estimated pond, calculate iou
+    if (length(idx) == 0) {
+          iou_vals[i] <- 0
+      } else {
+        pred_overlap <- pred[idx, ]
+        
+        # calculate intersection
+        intersection_area <- sum(
+            sf::st_intersection(
+              sf::st_geometry(obs[i, ]), 
+              sf::st_geometry(pred_overlap)
+            ) |>
+            sf::st_make_valid() |>
+            sf::st_area()
+          )
+        
+        # calculation union
+        union_area <- 
+          sf::st_union(
+            sf::st_geometry(obs[i, ]), 
+            sf::st_geometry(pred_overlap)
+          ) |>
+          sf::st_make_valid() |>
+          sf::st_area()
+        
+        # store IoU for this observed pond
+        iou_vals[i] <- as.numeric(intersection_area / union_area)
+      }
+  }
+  
+  obs <- obs |> 
+    mutate(
+      pond_size_ha = pond_size * 0.0001,                # total pond area in ha
+      pond_cloudless_ha = as.numeric(st_area(geometry)) * 0.0001  # after clouds removed
+    )
+    
+  tibble(
+    Plot                  = obs$Plot,
+    dataset               = ds,
+    source                = source_name,
+    pondid                = obs$rownum,        
+    pond_swx_ha           = obs$pond_size_ha,
+    pond_swx_ha_cloudless = obs$pond_cloudless_ha,
+    iou                   = iou_vals
+  )
+}
+```
+
+Get iou for each pond -- map function over each test survey ("ds") and product
+```{r}
+iou_results <- purrr::map_dfr(c("brood16", "2022", "2024"), function(ds) {
+  
+  obs_ds    <- ponds_obs |> filter(dataset == ds)
+
+  # get ponds and clouds for a given product
+  purrr::map_dfr(names(product_map), function(src) {
+    
+    pred_ds <- ponds_est |> 
+      filter(type == product_map[[src]], dataset == ds)
+    
+    cloud_type <- clouds_type_map[src] |> unname()
+
+    clouds_ds <- if (!is.null(cloud_type)) {
+      clouds |> filter(type == cloud_type, dataset == ds)
+    } else {
+      NULL
+    }
+
+    compute_ious(obs_ds, pred_ds, clouds_ds, source_name = src, ds = ds)
+  })
+})
+
+iou_results <- iou_results |> distinct()
+```
+
+```{r}
+write_csv(iou_results, here("data/accuracy_assessment/iou_results.csv"))
+```

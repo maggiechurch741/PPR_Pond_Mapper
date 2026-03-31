@@ -1,0 +1,166 @@
+---
+title: "Process GEE raster evaluation exports"
+author: "Maggie Church"
+created: "2024-06-26"
+updated: "2025-06-26"
+---
+
+```{r}
+library(terra)
+library(here)
+library(dplyr)
+library(sf)
+library(future.apply)
+library(parallel)
+```
+
+This file reads in the gee exports, combines, and saves as a compressed tif
+```{r}
+# read in ppr boundary
+ppr <- st_read(here("data", "boundaries", "PPJV"))
+
+# read in plot boundaries
+plots <- st_read(here("data", "allPlots")) |>
+  st_transform(4326)
+```
+
+
+# Process our classified rasters
+combine and trim raw classified tifs (our model), export as 1 tif
+this uses dt=0.87, and applies 10m morphological closing (conducted and exported from GEE)
+```{r}
+for(period in c("Aug16", "May22", "May24")){
+  mosaic_raster_to_ppr(
+    epsg = 32614,
+    input_folder = here(paste0("data/gee_exports/predicted_rasters/raw/smooth10m/smooth10_", period)),
+    output_path = here(paste0("data/gee_exports/predicted_rasters/processed/smooth10m/", period, ".tif"))
+  )
+}
+```
+
+# Process dynamic world rasters
+this uses dt=0.30 (exported from GEE)
+```{r}
+for(period in c("Aug2016", "May2022", "May2024")){
+  mosaic_raster_to_ppr(
+    epsg = 4326,
+    input_folder = here(paste0("data/gee_exports/gee_rasters/dynamicWorld/raw/", period)),
+    output_path = here(paste0("data/gee_exports/gee_rasters/dynamicWorld/processed/", period, ".tif"))
+  )
+}
+```
+
+# DSWE - aggressive
+```{r}
+for(period in c("Aug2016", "May2022", "May2024")){
+  mosaic_raster_to_ppr(
+    epsg = 4326,
+    input_folder = here(paste0("data/gee_exports/gee_rasters/dswe_aggressive/raw/", period)),
+    output_path = here(paste0("data/gee_exports/gee_rasters/dswe_aggressive/processed/", period, ".tif"))
+  )
+}
+```
+
+# DSWE - aggressive
+```{r}
+for(period in c("Aug2016", "May2022", "May2024")){
+  mosaic_raster_to_ppr(
+    epsg = 4326,
+    input_folder = here(paste0("data/gee_exports/gee_rasters/dswe_conservative/raw/", period)),
+    output_path = here(paste0("data/gee_exports/gee_rasters/dswe_conservative/processed/", period, ".tif"))
+  )
+}
+```
+
+# JRC
+```{r}
+for(period in c("Aug2016", "May2022", "May2024")){
+  mosaic_raster_to_ppr(
+    epsg = 4326,
+    input_folder = here(paste0("data/gee_exports/gee_rasters/jrc/raw/", period)),
+    output_path = here(paste0("data/gee_exports/gee_rasters/jrc/processed/", period, ".tif"))
+  )
+}
+```
+
+# NDVI
+This next chunk creates a function to split tiled NDVI exports into plot-sized tiles. 
+If a plot covers multiple tiles, crops from each tile are merged to cover full plot extent. 
+I don't simply mosaic these bc they're too big (perhaps bc it's a numeric var, instead of binary?)
+```{r}
+# set input and output paths
+input_path <- here(paste0("data/gee_exports/gee_rasters/ndvi/raw/", period))
+output_path <- here(paste0("data/gee_exports/gee_rasters/ndvi/processed"))
+
+# p is a plot id
+# rasters is a list of raw rasters
+
+# Function to crop raster tiles by plots
+crop_raster <- function(p, rasters, output_path) {
+  
+  # Get the extent for the current plot by filtering the plot_id
+  plot_extent <- plots[plots$Plot == p, ]
+  
+  # Initialize a list to store cropped rasters
+  cropped_rasters <- list()
+
+  # Initialize a list to store cropped rasters
+  for (i in seq_along(rasters)) {
+    raster <- rasters[[i]]  # Extract the raster from the list
+    
+    # Crop the raster with error handling for non-overlapping extents
+    cropped_raster <- tryCatch({
+        crop(raster, plot_extent)
+      }, error = function(e) {
+        return(NULL)})
+    
+  # If a valid cropped raster was returned, store it in the list
+  if (!is.null(cropped_raster) && !all(is.na(values(cropped_raster)))) {
+    cropped_rasters <- c(cropped_rasters, list(cropped_raster))
+    }
+  }
+  
+  # If there are any cropped rasters, merge them or return the single raster
+  if (length(cropped_rasters) > 0) {
+    if (length(cropped_rasters) == 1) {
+      # If there's only one cropped raster, no need to merge, just return it
+      merged_raster <- cropped_rasters[[1]]
+    } else {
+      # Merge all cropped rasters if more than one
+      merged_raster <- do.call(terra::merge, cropped_rasters)
+    }
+    
+    # Define the output file name based on the plot ID
+    output_file <- paste0(output_path, "/", period, "/raster_", p, ".tif")
+    
+    # Save the merged raster
+    writeRaster(merged_raster, output_file, overwrite = TRUE)
+    
+    return(output_file)  # Return the file path of the cropped raster
+  } else {
+    return(NULL)  # Return NULL if no rasters were cropped
+  }
+}
+
+################################################################################
+## Now we run the function! I use parallel processing to speed things up... this part only takes a few minutes.
+
+# Get unique plot IDs
+plot_ids <- unique(plots$Plot)
+
+# set up parallel processing
+w <- detectCores()
+plan(multisession, workers = w-2)
+
+# Load all GEE raster exports 
+files <- list.files(input_path, full.names = TRUE)
+rasters <- lapply(files, rast)
+
+# Apply the function to each plot
+result_files <- lapply(plot_ids, function(p) {
+  crop_raster(p, rasters, output_path=output_path)
+})
+
+# Reset the plan to sequential (stop parallelization)
+plan(sequential)
+```

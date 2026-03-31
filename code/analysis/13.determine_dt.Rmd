@@ -1,0 +1,179 @@
+---
+title: "Determine decision Threshold"
+author: "Maggie Church"
+created: "2025-07-14"
+updated: "2026-03-23"
+---
+
+**Description**: This script takes the confusion matrices (TN, TP, FN, TP) at different decision thresholds, using the final model features (script #11) and hyperparameters (script #12). These metrics are based on all pixels (within wetland footprints) from all training plot-surveys. I used all pixels, rather than the sampled training dataset, because I wanted to determine the threshold based on uneven classes (i.e. there are far more dry pixels than wet). And because that's a TON of data, I found this GEE-R process most efficient. 
+
+**Inputs:**
+
+-  Confusion matrix at different decision thresholds for all pixels in training test-surveys (exported from GEE, see link below)
+-  Confusion matrix at different decision thresholds for all pixels in training test-surveys (exported from GEE), using Dynamic World
+-  PPJV administrative boundary shapefile 
+-  Plot boundaries shapefile (created in script #1)
+-  Modified ecoregion boundaries shapefile (created in helper_functions/modify_ecoregions.R)
+
+**Steps:** 
+
+-  Create a function to calculate F-beta score at different thresholds
+-  Find the optimal decision threshold for our model and dynamic world, where beta = 0.5
+-  Explore how well this threshold serves different ecoregions (do we need ecoregion-specific threshold instead?)
+
+**Outputs:**
+
+-   A number: the decision threshold to use for classification (one for our model and one for dynamic world)
+
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(sf)
+library(pROC)
+library(scales)
+library(cowplot)
+library(future)
+library(furrr)
+```
+
+# Load data
+
+Load plots, ppr, and ecoregion boundaries
+```{r}
+plots <- st_read(here("data/allPlots")) |> st_transform(32614)
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> st_transform(32614)
+ecoregions <- st_read(here("data", "boundaries", "ecoregions6")) |> st_transform(32614)
+```
+
+# Create function to calculate f-beta score
+Function to calculate f-scores for each threshold (using the df output from the GEE code), a specified beta
+```{r}
+get_f_by_thresh <- function(df, fbeta){
+  df |> 
+    group_by(threshold) |>
+    summarize(
+      TP = sum(TP),
+      TN = sum(TN),
+      FP = sum(FP),
+      FN = sum(FN)
+    ) |> 
+    mutate(
+      precision = TP/(TP+FP),
+      recall = TP/(TP+FN),
+      f = (1 + fbeta^2) * precision * recall / (fbeta^2 * precision + recall)
+    )
+}
+```
+
+# Optimal threshold for our model
+OLD Load in our model's training probabilities 
+```{r}
+# point_probabilities_train <-
+#   bind_rows(
+#     read_csv(here("data/accuracy_assessment/ver3/point_probabilities_train/point_probabilities_May23_train.csv")),
+#     read_csv(here("data/accuracy_assessment/ver3/point_probabilities_train/point_probabilities_May21_train.csv")),
+#     read_csv(here("data/accuracy_assessment/ver3/point_probabilities_train/point_probabilities_May19_train.csv"))
+#   ) |> 
+#   mutate(dataset=as.character(dataset)) |>
+#   bind_rows(read_csv(here("data/accuracy_assessment/ver3/point_probabilities_train/point_probabilities_train16_17.csv")))
+```
+
+This came from GEE: https://code.earthengine.google.com/c0e79d05ac820e225c5a816dccfd5cd9
+Then get f-0.5 score across thresholds
+```{r}
+# run the GEE code above for thresholds between 0.1 and 0.9 by 0.10 (coarse search)
+folder_path <- here("data/gee_exports/predicted_rasters/processed/confusion_matrices_across_thresholds/PPM_confusion_allPlots")
+
+ppm_cm <- list.files(
+  path = folder_path,
+  pattern = "\\.csv$",
+  full.names = TRUE
+) |>
+  map(read_csv, col_types = cols(dataset = col_character())) |>
+  list_rbind()
+
+# Ok, max f is somewhere between a 0.7 and 0.9 threshold
+get_f_by_thresh(ppm_cm, 0.5)
+
+# re-run the GEE code for thresholds between 0.7 and 0.9 by 0.01 (fine search)
+folder_path <- here("data/gee_exports/predicted_rasters/processed/confusion_matrices_across_thresholds/PPM_confusion_allPlots_finesearch")
+
+ppm_cm_fine <- list.files(
+  path = folder_path,
+  pattern = "\\.csv$",
+  full.names = TRUE
+) |>
+  map(read_csv, col_types = cols(dataset = col_character())) |>
+  list_rbind()
+
+# Ok, max f is 0.77, when threshold is 0.87
+get_f_by_thresh(ppm_cm_fine, 0.5)
+```
+
+# Optimal threshold for Dynamic World
+Load in dynamic world's training probabilities = p(water) + p(flooded_vegetation)  
+This came from GEE: https://code.earthengine.google.com/79767a9adac29835ea8f43b48f20706e
+Then get f-0.5 score across thresholds
+```{r}
+# run the GEE code above for thresholds between 0.1 and 0.9 by 0.10 (coarse search)
+dw_cm <- read_csv(here("data/gee_exports/gee_rasters/dynamicWorld/DW_confusion_allPlots.csv"))
+
+# Ok, max f is somewhere between a 0.5 and 0.7 threshold
+get_f_by_thresh(dw_cm, 0.5)
+
+# re-run the GEE code for thresholds between 0.5 and 0.7 by 0.01 (fine search)
+dw_cm_fine <- read_csv(here("data/gee_exports/gee_rasters/dynamicWorld/DW_confusion_allPlots_finesearch.csv"))
+
+# Ok, max f is 0.749, when threshold is 0.56-0.60
+get_f_by_thresh(dw_cm_fine, 0.5)
+```
+
+We've gotta pick between 0.56 and 0.60, for the dw threshold. Let's go with 0.56, because it has a better balance of recall-precision
+
+# Explore: are ecoregion-specific threshold necessary?
+
+```{r}
+plot_ecoreg_xwalk <- st_join(plots, ecoregions, largest=T) |>
+  select(plotID=Plot, L3mod) |>
+  st_drop_geometry() |>
+  distinct()
+```
+
+See if different decision thresholds are suggested for different ecoregions: our model
+-> ecoregion-specific optimal thresholds are negligibly different from 0.87 (yay)
+```{r}
+ppm_cm |>
+  bind_rows(ppm_cm_fine) |>
+  inner_join(plot_ecoreg_xwalk) |>
+  group_by(L3mod) |>
+  group_modify(~ get_f_by_thresh(.x, fbeta = 0.5)) |>
+  group_by(L3mod) |>
+  mutate(best = f == max(f)) |>
+  ggplot(aes(x=threshold, y=f, color=L3mod)) + 
+  geom_line() + 
+  geom_point() +
+  geom_vline(xintercept = 0.87, linetype="dashed") + 
+  geom_point(data = ~ filter(.x, best), size = 4, aes(fill = L3mod)) +
+  labs(y="F-0.5 score", title="dynamic world")
+# opt F0.5 dt's are really similar across ecoregions
+```
+
+See if different decision thresholds are suggested for different ecoregions: dynamic World
+-> ecoregion-specific optimal thresholds are negligibly different from 0.56 (yay)
+```{r}
+dw_cm |>
+  bind_rows(dw_cm_fine) |>
+  inner_join(plot_ecoreg_xwalk) |>
+  group_by(L3mod) |>
+  group_modify(~ get_f_by_thresh(.x, fbeta = 0.5)) |>
+  group_by(L3mod) |>
+  mutate(best = f == max(f)) |>
+  ggplot(aes(x=threshold, y=f, color=L3mod)) + 
+  geom_line() + 
+  geom_point() +
+  geom_vline(xintercept = 0.56, linetype="dashed") + 
+  geom_point(data = ~ filter(.x, best), size = 4, aes(fill = L3mod)) +
+  labs(y="F-0.5 score", title="dynamic world")
+```

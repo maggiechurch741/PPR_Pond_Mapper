@@ -1,0 +1,110 @@
+---
+title: 'Fig S7: Map of error'
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(viridis)
+library(cowplot)
+```
+
+```{r}
+## Read in boundary files
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> st_transform(32614)
+plots <- st_read(here("data", "allPlots")) |> st_transform(32614)
+
+# Read in plot-level test results
+plot_results <- read_csv(here(paste0("data/accuracy_assessment/plot_results.csv")))
+
+# For plot-level analysis, I stratify: 6 plots per ecoregion-survey. These are plots with HAPET data that I trust
+test_plots_stratified <- read_csv(here("data/train_test_data/test_plot_surveys_stratified.csv"))
+plot_results <- inner_join(plot_results, test_plots_stratified)
+
+# Get pixel-level test results
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+
+# Load function to calculate grouped pixel-level accuracy
+source(here("code/analysis/make_figures/helper_functions/calculate_grouped_accuracy.R"))
+```
+
+```{r}
+# CM metrics
+acc_plots <- 
+  pixel_results |> 
+  calculate_grouped_accuracy(group_cols = c("Plot", "dataset"),  model = "postproc10")
+
+
+# add plot-level metrics
+acc_plots2 <- plot_results |>
+        filter(source == "postproc10", class == "water") |> 
+        group_by(Plot, dataset) |>
+        summarize(
+          plot_rmse = round(sqrt(mean(((pred_area_m2 - true_wet_area_m2_cloudless) / 1e4)^2, na.rm = TRUE)), 2),
+          plot_mean_error = round(mean((pred_area_m2 - true_wet_area_m2_cloudless) / 1e4, na.rm = TRUE), 2),
+          plot_perc_detected = round(mean(pred_area_m2 / true_wet_area_m2_cloudless, na.rm = TRUE) * 100, 1),
+          n_plots = n()
+        )
+
+acc_plots <- left_join(acc_plots, acc_plots2)
+
+acc_plots_sf <- inner_join(plots, acc_plots) 
+
+# Shift 2022 plots (jitter)  
+acc_shifted <- acc_plots_sf
+idx <- acc_shifted$dataset == "2022"
+acc_shifted$geometry[idx] <- acc_shifted$geometry[idx] + cbind(20000, -20000)
+acc_shifted <- acc_shifted |> st_set_crs(32614)
+acc_shifted_pts <- acc_shifted |> st_centroid()
+
+# OE: 750, 400
+a <- ggplot() + 
+  geom_sf(data = ppr, fill = "darkgrey") +
+  geom_sf(data = acc_shifted_pts, aes(color = oe), size = 2, shape = 16) +
+  scale_color_gradient(low = "green", high = "red", limits = c(0, 1)) +
+  theme_void() +
+  labs(color = "Omission Error")
+
+b <- ggplot() + 
+  geom_sf(data = ppr, fill = "darkgrey") +
+  geom_sf(data = acc_shifted_pts, aes(color = ce), size = 2, shape = 16) +
+  scale_color_gradient(low = "green", high = "red", limits = c(0, 1)) +
+  theme_void() +
+  labs(color = "Commission Error")
+
+c <- ggplot() + 
+  geom_sf(data = ppr, fill = "darkgrey") +
+  geom_sf(data = acc_shifted_pts |> filter(!is.na(plot_mean_error)), aes(color = plot_mean_error), size = 2, shape = 16) +
+  scale_color_gradientn(
+    colors = c("red", "orange", "white", "blue"),
+    values = scales::rescale(c(-250, -100, 0, 100))
+  ) +
+  theme_void() +
+  labs(color = "Residual (ha)")
+
+p_a <- ggdraw(a) +
+  draw_plot_label("a", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold")
+
+p_b <- ggdraw(b) +
+  draw_plot_label("b", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold")
+
+p_c <-ggdraw(c) +
+  draw_plot_label("c", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold")
+
+p <- plot_grid(p_a, p_b, p_c, ncol = 1)
+p
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_S7.png"),
+       plot = p,
+       width = 650/96, 
+       height = 750/96, 
+       units = "in",
+       dpi = 1000,
+       bg = "white")  
+```

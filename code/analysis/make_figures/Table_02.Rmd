@@ -1,0 +1,148 @@
+---
+title: "Table 2"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+source(here("code/analysis/make_figures/helper_functions/create_grouped_stats_table.R"))
+source(here("code/analysis/make_figures/helper_functions/calculate_grouped_accuracy.R"))
+
+test_plots_stratified <- read_csv(here("data/train_test_data/test_plot_surveys_stratified.csv"))
+
+ecoregion_plot_xwalk <- pixel_results |> distinct(Plot, ecoregion_name) 
+
+# For plot-level analysis, I stratify: 6 plots per ecoregion-survey. These are plots with HAPET data that I trust
+plot_results <- read_csv(here("data/accuracy_assessment/plot_results.csv")) |>
+  inner_join(test_plots_stratified) |>
+  left_join(ecoregion_plot_xwalk)
+  
+# Same with iou results
+iou_results <- read_csv(here("data/accuracy_assessment/iou_results.csv")) |> 
+  inner_join(test_plots_stratified)  |> 
+  left_join(ecoregion_plot_xwalk) |> 
+  mutate(cloud_ratio = 1 - pond_swx_ha_cloudless / pond_swx_ha)
+
+# Same with pond counts
+all_sf <- st_read(here("data/accuracy_assessment/all_est_obs_clouds")) |>
+  inner_join(test_plots_stratified)  |>
+  left_join(ecoregion_plot_xwalk)
+```
+
+#  Pixel and plot results
+```{r}
+pixel_plot_table <- pixel_results |> 
+  calculate_grouped_accuracy(group_cols = c("ecoregion_name"), model = "postproc10") |>
+  create_grouped_stats_table(group_col = ecoregion_name,  model="postproc10") |>
+  arrange(ecoregion_name)
+
+pixel_plot_table
+```
+
+# Iou results 
+Let's drop a pond if it has any clouds...
+```{r}
+iou_table <- iou_results |> 
+  ungroup() |>
+  filter(source=="postproc10" & !is.infinite(iou)) |>
+  filter(cloud_ratio < 0.02)|> #drop ponds with > 2% cloud coverage
+  group_by(ecoregion_name) |> 
+  summarize(
+    mean_iou = round(mean(iou), 2),
+    detected = round(sum(iou > 0) / n() * 100, 0),
+    m_ponds = n(),
+    .groups = "drop"
+  )
+
+iou_table
+```
+
+# Pond-count RMSE 
+Let's drop the entire plot if it has any clouds...
+```{r}
+# keep only plots with NO cloud overlap
+cloud_plots <- all_sf |> 
+  filter(type=="clouds_ours") |>
+  st_drop_geometry() |>
+  distinct(Plot, dataset)
+
+pond_count_rmse <- all_sf |> 
+  st_drop_geometry() |>    
+  filter(type %in% c("estimated_ours", "observed")) |> 
+ # select(Plot, dataset, ecoregion_name, type) |>
+  anti_join(cloud_plots) |>
+  group_by(Plot, dataset, ecoregion_name) |>
+  summarize(
+    pred = sum(type=="estimated_ours"),                         
+    obs  = sum(type=="observed"),                                  
+    .groups = "drop"
+  ) |>
+  group_by(ecoregion_name) |>
+  summarize(pond_count_rmse = round(sqrt(mean((pred - obs)^2, na.rm = TRUE)),0), .groups = "drop")
+
+pond_count_rmse
+```
+
+# Pond-count RMSE (old)
+Let's drop a pond if it has any clouds...
+```{r}
+ponds_est <- all_sf |> filter(type=="estimated_ours") |> select(Plot, dataset, ecoregion_name, type)
+ponds_obs <- all_sf |> filter(type=="observed")       |> select(Plot, dataset, ecoregion_name, type)
+clouds    <- all_sf |> filter(type=="clouds_ours")    |> select(Plot, dataset, ecoregion_name, type)
+
+##################################
+# keep only ponds with NO cloud overlap
+ponds_obs_cloudless <- list()
+ponds_est_cloudless <- list()
+
+for(i in c("brood16", "2022", "2024")){
+  clouds_i    <- clouds    |> filter(dataset == i) |> st_union() |> st_make_valid()
+  ponds_obs_i <- ponds_obs |> filter(dataset == i) |> st_make_valid()
+  ponds_est_i <- ponds_est |> filter(dataset == i) |> st_make_valid()
+  
+  ponds_obs_cloudless[[i]] <- ponds_obs_i |> filter(!lengths(st_intersects(ponds_obs_i, clouds_i)))
+  ponds_est_cloudless[[i]] <- ponds_est_i |> filter(!lengths(st_intersects(ponds_est_i, clouds_i)))
+}
+
+ponds_obs_cloudless <- bind_rows(ponds_obs_cloudless)
+ponds_est_cloudless <- bind_rows(ponds_est_cloudless)
+
+df <- bind_rows(
+  st_drop_geometry(ponds_obs_cloudless), 
+  st_drop_geometry(ponds_est_cloudless)
+)
+##################################
+
+pond_count_rmse_old <- df |>
+  group_by(Plot, dataset, ecoregion_name) |>
+  summarize(
+    pred = sum(type=="estimated_ours"),                         
+    obs  = sum(type=="observed"),                                  
+    .groups = "drop"
+  ) |>
+  group_by(ecoregion_name) |>
+  summarize(rmse = round(sqrt(mean((pred - obs)^2, na.rm = TRUE)),0), .groups = "drop") 
+
+pond_count_rmse_old
+```
+
+# Combine tables
+```{r}
+t2 <- pixel_plot_table |>
+  inner_join(pond_count_rmse) |>
+  inner_join(iou_table) |>
+  relocate(n_plots, .before=m_ponds)
+
+t2
+```
+
+```{r}
+write_csv(t2, here("figures/R/Table_02.csv"))
+```

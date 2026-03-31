@@ -1,0 +1,544 @@
+---
+title: "get plot results"
+author: "Maggie Church"
+created: "2025-10-22"
+updated: "2026-03-25"
+---
+
+**Description**:  Evaluates the plot-level accuracy of surface water classification products 
+(our post-processed model, Dynamic World, DSWE aggressive, DSWE conservative, and JRC) 
+against HAPET ground-truth pond observations across PPJV survey plots. For each 
+out-of-sample plot-survey, computes a) predicted vs. observed inundated area by class (water, dry, cloud, nonwetland) 
+and b) IoU-based pond detection metrics stratified by pond size class (<0.5 ha, 0.5–4 ha, >4 ha).
+
+**Inputs**:
+-  PPJV administrative boundary shapefile 
+-  Plot boundary shapefile (created in script #1)
+-  HAPET pond boundaries for all ponds (including ones < 0.04 ha) with split polygons merged (script #2)
+-  Test plot-survey ids (we can stratify these later)
+-  County-level PHDI from NOAA
+-  Prediction rasters for each test year (exported from GEE): our post-processed classification raster, Dynamic World, DSWE, NDVI, and JRC
+-  Crosswalk mapping raster values to class labels
+
+**Steps**:
+1. Read in plot boundaries, HAPET pond observations, and prediction rasters for all products
+2. For each out-of-sample plot-survey:
+   a. Clip plot to a 1000 ha square in the appropriate UTM zone
+   b. Spatially join PHDI drought index to observed ponds
+   c. For each product, crop prediction raster to plot extent and compute area by class (water, dry, cloud)
+   d. Compute cloud-adjusted true wet area
+   e. Calculate IoU for each observed pond vs. predicted water, stratified by pond size class
+3. Combine results across three test years (Aug 2016, May 2022, May 2024)
+4. Exclude plots with unreliable HAPET digitizations (plots 204, 620)
+
+**Outputs**:
+- `polygon_assessment_oost_plots_post_processed.csv` — plot-level area metrics by product and year
+- `iou_assessment_oost_plots_post_processed.csv` — pond-level IoU metrics by size class, product, and year
+
+```{r}
+library(tidyverse)
+library(here)
+library(terra)
+library(sf)
+
+options(sf_use_s2 = TRUE)
+```
+
+# Read in datasets
+```{r}
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> st_transform(32614)
+plots <- st_read(here("data", "allPlots")) 
+ponds <- st_read(here("data", "allPonds_all")) |> st_transform(4326)
+
+# convert plots to a SpatVector
+plots_terra <- vect(plots)
+
+# set test plots and time periods
+test_plot_ids <- read_csv("data/train_test_data/test_plot_surveys.csv")
+
+# get PHDI
+source(here("code/analysis/helper_functions/get_phdi.R"))
+
+phdi <- do.call(rbind, lapply(names(phdi_data_list), function(n) {
+  cbind(source = n, processed_phdi_list[[n]])
+})) |>
+  mutate(PHDI = as.numeric(PHDI)) |>
+  filter(!is.na(PHDI))
+```
+
+# Read in estimation rasters
+```{r}
+# load post-proc images
+postproc_files10 <- list.files(path = here("data/gee_exports/predicted_rasters/processed/smooth10m/"), pattern = "\\.tif$", full.names = TRUE)
+postproc_rasters10 <- lapply(postproc_files10, terra::rast)
+names(postproc_rasters10) <- tools::file_path_sans_ext(basename(postproc_files10))
+
+# load jrc images
+jrc_files <- list.files(path = here("data/gee_exports/gee_rasters/jrc/processed"), pattern = "\\.tif$", full.names = TRUE)
+jrc_rasters <- lapply(jrc_files, terra::rast)
+names(jrc_rasters) <- tools::file_path_sans_ext(basename(jrc_files))
+
+# load dw images
+dw_files <- list.files(path = here("data/gee_exports/gee_rasters/dynamicWorld/processed"), pattern = "\\.tif$", full.names = TRUE)
+dw_rasters <- lapply(dw_files, terra::rast)
+names(dw_rasters) <- tools::file_path_sans_ext(basename(dw_files))
+
+# load dswe-aggressive images
+dswe_agg_files <- list.files(path = here("data/gee_exports/gee_rasters/dswe_aggressive/processed"), pattern = "\\.tif$", full.names = TRUE)
+dswe_agg_rasters <- lapply(dswe_agg_files, terra::rast)
+names(dswe_agg_rasters) <- tools::file_path_sans_ext(basename(dswe_agg_files))
+
+# load dswe-conservative images
+dswe_cons_files <- list.files(path = here("data/gee_exports/gee_rasters/dswe_conservative/processed"), pattern = "\\.tif$", full.names = TRUE)
+dswe_cons_rasters <- lapply(dswe_cons_files, terra::rast)
+names(dswe_cons_rasters) <- tools::file_path_sans_ext(basename(dswe_cons_files))
+```
+
+# Define raster codes
+```{r}
+crosswalks <- readRDS(here("data/gee_exports/product_codes"))
+
+crosswalks <- lapply(crosswalks, function(cw) {
+  cw$value <- as.numeric(cw$value)
+  cw
+})
+```
+
+# Quick function to get utm zone epsg from epsg4326 sf plot polygon
+```{r}
+epsg_code_from_wgs <- function(plot_vect){
+  # Put into projected crs for buffering - find the best UTM zone
+  plot_sf <- st_as_sf(plot_vect)
+  plot_centroid <- st_coordinates(st_centroid(plot_sf))
+  lon <- plot_centroid[1]
+  lat <- plot_centroid[2]
+  zone <- floor((lon + 180) / 6) + 1
+  epsg <- ifelse(lat >= 0, 32600 + zone, 32700 + zone)
+  return(epsg)
+}
+```
+
+# Make plot square function
+```{r}
+# this'll ensure the plot is a 1000 ha square
+make_square <- function(obj_wgs, area, epsg) {
+  
+  # Put into projected crs for buffering - find the best UTM zone
+  plot_sf_utm <- st_transform(obj_wgs, epsg)
+  
+  # make square
+  bbox <- st_bbox(plot_sf_utm)
+  width  <- bbox["xmax"] - bbox["xmin"]
+  height <- bbox["ymax"] - bbox["ymin"]
+  
+  if (width > height) {
+    diff = width - height
+    bbox["xmax"] <- bbox["xmax"] - diff
+  } else if (height > width) {
+    diff = height - width
+    bbox["ymax"] <- bbox["ymax"] - diff
+  }
+  
+  square_poly <- st_as_sfc(bbox)
+  plot_square <- st_intersection(plot_sf_utm, square_poly)
+  
+  # the resulting square isn't axis-aligned, so I can't assume area=l*w
+  # I have to iteratively find the buffer that makes the square 1000 ha
+  f <- function(d) {abs(as.numeric(st_area(st_buffer(plot_square, dist=-d))) - area)}
+  opt_d <- optimize(f, interval=seq(0, 50, 0.5))$minimum
+  plot_sf_utm_buff <- st_buffer(plot_square, dist=-opt_d)
+  
+  # convert back to wgs84
+  plot_sf_buff <- st_transform(plot_sf_utm_buff, 4326)
+  return(plot_sf_buff)
+}
+```
+
+# Fn to calculate IOU metrics
+```{r}
+calculate_iou <- function(true_polys, pred_polys){
+   inter <- st_intersection(true_polys, pred_polys)
+   union <- st_union(bind_rows(true_polys, pred_polys))
+   
+   inter_area <- sum(st_area(inter))  
+   union_area <- sum(st_area(union))  
+   iou <- as.numeric(inter_area/union_area)
+   
+   return(iou)
+}
+```
+
+# area counts by class
+Function to, for a given product:
+ 1. crop a ppr-wide raster into a plot-size chunk
+ 2. convert to UTM and crop again so that the raster is exactly a 100 ha square 
+ 3. get area for each class (water, dry, cloud)
+ 4. get corresponding true HAPET wet area for noncloudy areas
+
+Inputs: 
+  pred_raster: a ppr-wide prediction raster, with categories defined in the crosswalk
+  source: name of product. We'll use this for the crosswalk so it needs to be a specific name
+  plot: original plot boundary (vect, 4326)
+  plot_square: plot boundary cropped to be 100 ha and square-shaped (sf, 4326)
+  true_wet: true wet HAPET polygons
+  epsg: UTM zone for cropping and calculating area
+
+Outputs: df with 
+ - Surface water extent (observed - clouds)
+ - Surface water extent (estimated)
+ - By pond size class (<0.5ha, 0.5-2ha, >2ha): mean IoU, # ponds "detected" at different IoU thresholds (0, 0.25, 0.5)
+ - # observed ponds
+```{r}
+count_area <- function(pred_raster, source, plot, plot_square, true_wet, epsg){
+  
+  # Skip if input is NULL or not a raster
+  if (is.null(pred_raster) || !inherits(pred_raster, "SpatRaster")) {
+    # Return empty data frames instead of NULL
+    plot_metrics <- tibble()
+    iou_summary <- tibble(
+      size_class = c("small", "medium", "large"),
+      mean_iou   = NA,
+      n_gt_0.5   = NA,
+      n_gt_0.25  = NA,
+      n_gt_0     = NA,
+      n          = NA
+    )
+    return(list(plot_metrics = plot_metrics, iou_summary = iou_summary))
+  }  
+  # what epsg is the prediction raster in?
+  crs_pred_raster <- crs(pred_raster, describe = TRUE)$code
+  
+  # Crop the ppr raster to the plot first, in the raster's epsg
+  if (crs_pred_raster != 4326) {
+    plot_extent <- plot |> terra::project(paste0("EPSG:", crs_pred_raster)) |> terra::ext()
+  } else {
+    plot_extent <- terra::ext(plot)
+  }
+  
+  # crop
+  cropped_pred_rast <- terra::crop(pred_raster, plot_extent)
+  names(cropped_pred_rast) <- "value"
+  cropped_pred_rast <- as.factor(cropped_pred_rast)
+  
+  # get needed layers into UTM
+  plot_square_utm <- sf::st_transform(plot_square, epsg)
+  true_wet_utm <- st_transform(true_wet, epsg)
+  
+  # project to utm and make it match the square 100 ha plot exactly
+  cropped_pred_sf_utm <- 
+    cropped_pred_rast |> 
+    terra::project(paste0("EPSG:", epsg)) |>
+    terra::as.polygons() |> 
+    sf::st_as_sf() |> 
+    sf::st_intersection(plot_square_utm)
+  
+  # calculate area by class
+  areas <- cropped_pred_sf_utm |> 
+    select(value) |> 
+    mutate(
+      pred_area_m2 = as.numeric(st_area(geometry)),
+      value = as.numeric(as.character(value))) |>
+    left_join(crosswalks[[source]], by = "value")
+  
+  # true water surface area of the plot-survey (based only on HAPET data)
+  true_wet_area_m2 <- true_wet_utm |> 
+    st_intersection(plot_square_utm) |>                  # 100 ha square plot
+    mutate(actual_area = as.numeric(sf::st_area(geometry))) |> 
+    summarize(true_wet_area_m2 = sum(actual_area)) |>    # return total water surface area
+    pull(true_wet_area_m2)
+    
+  # if there are clouds in this plot, get cloud-adjusted true water surface area
+  if("clouds" %in% areas$class){
+    
+    # get cloud mask
+    clouds <- areas |> filter(class=="clouds")
+    
+    # if the entire plot is clouded, set cloud-adjusted true water surface area = 0
+    # allows a rounding area of 1 m2
+    if(abs(pull(clouds, pred_area_m2) - 1e7) < 1){
+      true_wet_area_m2_cloudless <- 0
+      } else {
+    
+    # total actual water surface area of the plot-survey, where this product is cloudless
+    true_wet_area_m2_cloudless <- 
+      true_wet_utm |> 
+      st_intersection(plot_square_utm) |>                                 # 100 ha square plot
+      st_difference(clouds) |>                                            # remove clouds
+      st_collection_extract("POLYGON", warn = FALSE) |>                   # remove slivers (non-polygons)
+      mutate(true_cloudless_area = as.numeric(st_area(geometry))) |>      # remove slivers (too small)
+      filter(true_cloudless_area > 1) |>                                  # remove slivers  (too small)
+      summarize(true_wet_area_m2_cloudless = sum(true_cloudless_area)) |> # return true wet, cloudless areas
+      pull(true_wet_area_m2_cloudless)
+    }
+  } else {
+    true_wet_area_m2_cloudless <- true_wet_area_m2
+  }
+  
+  plot_metrics <- areas |> 
+    st_drop_geometry() |> 
+    mutate(true_wet_area_m2_cloudless = true_wet_area_m2_cloudless,
+           true_wet_area_m2 = true_wet_area_m2,
+           source = source)
+  
+  ##########################################
+  # I'm going to calculate IoU while we're here
+  
+    ### get cloudless true water ###
+    if("clouds" %in% areas$class){
+      
+      clouds <- areas |> filter(class=="clouds")                          # get cloud mask
+      
+      true_wet_utm_cloudless <-  true_wet_utm |> 
+        st_intersection(plot_square_utm) |>                               # limit to 1000 ha
+        st_difference(clouds) |>                                          # remove clouds
+        st_collection_extract("POLYGON", warn = FALSE) |>                 # remove slivers (non-polygons)
+        mutate(true_cloudless_area = as.numeric(st_area(geometry))) |>    # remove slivers (too small)
+        filter(true_cloudless_area > 1)                                    # remove slivers  (too small)
+      
+    } else {
+        true_wet_utm_cloudless <- true_wet_utm |> 
+          st_intersection(plot_square_utm)
+    }
+
+  ### limit predictions to water ### 
+  pred_water_sf_utm <- cropped_pred_sf_utm |> 
+    mutate(value = as.numeric(as.character(value))) |>    
+    left_join(crosswalks[[source]], by = "value") |> 
+    filter(class=="water") |> 
+    st_cast("POLYGON") 
+    
+  # calculate overall plot IoU
+  true_wet_small <- true_wet_utm_cloudless |> filter(as.numeric(st_area(geometry)) < 5000) # < 0.5 ha
+  true_wet_med <- true_wet_utm_cloudless |> filter(as.numeric(st_area(geometry)) >= 5000 & as.numeric(st_area(geometry)) <= 40000) # 0.5-4 ha
+  true_wet_lar <- true_wet_utm_cloudless |> filter(as.numeric(st_area(geometry)) > 40000) # > 4 ha
+  
+  # Initialize empty vector 
+  calc_ious <- function(true_wet_polys){
+    
+    # loop through each true pond and calculate IOU
+    ious <- numeric(nrow(true_wet_polys))
+    
+    for(i in 1:nrow(true_wet_polys)){
+      true_poly <- true_wet_polys[i, ]
+      pred_poly <- pred_water_sf_utm |> filter(lengths(st_intersects(pred_water_sf_utm, true_poly)) > 0)
+      ious[i] <- calculate_iou(true_poly, pred_poly)
+    }
+    
+    # combine pond ious
+    list(
+      mean_iou = mean(ious),
+      n_gt_0.5 = sum(ious > 0.5),
+      n_gt_0.25 = sum(ious > 0.25),
+      n_gt_0 = sum(ious > 0), # any detection
+      n = nrow(true_wet_polys)
+    )
+  }
+  
+  iou_small <- calc_ious(true_wet_small)
+  iou_med <- calc_ious(true_wet_med)
+  iou_lar <- calc_ious(true_wet_lar)
+  
+  # Combine into a single table
+  iou_summary <- bind_rows(
+    tibble(size_class = "small", !!!iou_small),
+    tibble(size_class = "medium", !!!iou_med),
+    tibble(size_class = "large", !!!iou_lar)
+  )
+  
+  ########################################
+  list(
+    plot_metrics = plot_metrics,
+    iou_summary  = iou_summary
+  )
+}
+```
+
+
+# Get actual + estimated results at pond and plot levels
+I recognize this fn is a monster. I just kept adding to it...
+
+This calls on each of the functions above (for a given year)
+ epsg_code_from_wgs()
+ make_square() 
+ count_area()
+```{r}
+evaluate_plot_inundation <- function(year_label, 
+                                    mmYYYY,
+                                    phdi_yr = NULL,
+                                    oos = TRUE, 
+                                    area = 1e7){
+  
+  # limit to ponds within the year
+  ponds_yr <- ponds |> filter(dataset==year_label) 
+  
+  # keep only test plots (optional)
+  if(oos==T){
+    ponds_yr <- ponds_yr |> filter(Plot %in% test_plot_ids$plot_id)
+  }
+  
+  # initialize empty list
+  plot_level_list <- list()
+  iou_list <- list()
+  
+  for(i in 1:nrow(plots)){
+
+      ##############################################
+      # 1. Get pixel-based actual + estimated results for plot i:
+      # Load plot 
+      plot <- plots_terra[i,] 
+      plot_id <- plot$Plot
+      message("Processing plot: ", plot_id)
+      
+      # get UTM epsg code for this plot (we'll use this for clipping, buffering, and area calculations)
+      plot_sf <- st_as_sf(plot)
+      epsg <- epsg_code_from_wgs(plot_sf)
+      
+      # clip plot to be a 1000 ha square - we'll use this as a cookie cutter for 
+      # all layers, to ensure they're totally aligned
+      plot_sf_square <- make_square(plot_sf, area = 1e7, epsg=epsg)
+      
+      # Get actual ponds for this plot (true observations)
+      true_wet <- ponds_yr |> filter(Plot == plot_id)
+      
+      # If an actual ponds are found within this plot, get predicted metrics
+      if (nrow(true_wet) > 0) {
+        
+        # If there are weird slivers in true_wet, deal with it here
+        if(any(!st_is_valid(true_wet))){
+          true_wet <- true_wet |>
+            sf::st_make_valid()
+        } 
+        
+    ##############################################
+    # 2. Add PHDI
+    phdi_filtered <- phdi |> 
+      filter(source == phdi_yr) |> 
+      st_transform(4326)
+    
+    # Spatial join to get PHDI to the true_wet sf (if a pond is inter-county, 
+    # it'll have 2 PHDIs. Get the weighted mean)
+    pond_phdis <- st_intersection(true_wet, phdi_filtered[c("PHDI", "name")]) |>
+      mutate(intersect_area = as.numeric(st_area(geometry))) |>
+      group_by(rownum) |>
+      summarize(
+        PHDI = sum(PHDI * intersect_area, na.rm = TRUE) / sum(intersect_area, na.rm = TRUE),
+        .groups = "drop"
+      ) |>
+      st_drop_geometry() 
+    
+    true_wet <- left_join(true_wet, pond_phdis, by = "rownum")
+    
+    # get PHDI (averaged over all ponds) for this plot
+    plot_phdi <- true_wet |> 
+      distinct(PHDI) |> 
+      summarize(mean(PHDI)) |> 
+      pull()
+    
+    ##############################################
+    # 3. Plot level evaluation
+    if (any(st_geometry_type(true_wet) == "GEOMETRYCOLLECTION")) {
+      true_wet <- true_wet |>
+        st_collection_extract("POLYGON", warn = FALSE)
+    } 
+    
+    # jrc doesn't go past 2021; all others are available for our study period
+    area_counts_jrc       <- count_area(jrc_rasters[[mmYYYY]], source="jrc",
+                                        plot, plot_sf_square, true_wet, epsg=epsg)
+    area_counts_dw        <- count_area(dw_rasters[[mmYYYY]], source="dw",
+                                        plot, plot_sf_square, true_wet, epsg=epsg)
+    area_counts_dswe_agg  <- count_area(dswe_agg_rasters[[mmYYYY]], source="dswe_agg",
+                                        plot, plot_sf_square, true_wet, epsg=epsg)
+    area_counts_dswe_cons <- count_area(dswe_cons_rasters[[mmYYYY]], source="dswe_cons",
+                                        plot, plot_sf_square, true_wet, epsg=epsg)
+    area_counts_postproc10 <- count_area(postproc_rasters10[[mmYYYY]], source="postproc10",
+                                        plot, plot_sf_square, true_wet, epsg=epsg)
+    
+  # Combine plot-level area metrics
+  plot_results <- dplyr::bind_rows(
+    area_counts_postproc10$plot_metrics,
+    area_counts_jrc$plot_metrics,
+    area_counts_dw$plot_metrics,
+    area_counts_dswe_agg$plot_metrics,
+    area_counts_dswe_cons$plot_metrics
+  ) |> 
+    mutate(Plot = plot_id,
+           dataset = year_label,
+           phdi = plot_phdi)
+  
+  # Combine IoU summaries
+  iou_results <- dplyr::bind_rows(
+    area_counts_postproc10$iou_summary  |> mutate(source="postproc10"),
+    area_counts_jrc$iou_summary       |> mutate(source="jrc"),  
+    area_counts_dw$iou_summary        |> mutate(source="dw"),
+    area_counts_dswe_agg$iou_summary  |> mutate(source="dswe_agg"),
+    area_counts_dswe_cons$iou_summary |> mutate(source="dswe_cons")
+  ) |> 
+    mutate(Plot = plot_id,
+           dataset = year_label)
+    
+    ##############################################
+    # Store results in list
+    plot_level_list[[i]] <- plot_results
+    iou_list[[i]] <- iou_results
+
+  } else {
+    message("Skipping plot ", plot_id, " — prediction raster has no wet areas")
+    next  
+  }
+}
+
+# Combine plot-level results
+all_plot_results <- do.call(bind_rows, plot_level_list)
+all_ious_results <- do.call(bind_rows, iou_list)
+
+# Add test box id
+all_plot_results <- all_plot_results |> 
+  mutate(test_box = case_when(
+    Plot %in% c(944, 950, 996, 992, 993, 937, 930, 940, 915, 905) ~ 1,
+    Plot %in% c(154,120,119,155,601,118,343, 997:1004) ~ 2, 
+    Plot %in% c(768,620,204,280,281,202,201,198,282,283) ~ 3, 
+    Plot %in% c(313,312,272,271,269,266,265,262,263,264,268,267) ~ 4,
+    Plot %in% c(502,69,44,178,45,50,521,340,177,416,417,621,414,412) ~ 5,
+    Plot %in% c(737,249,746,253,250,767,803,804,809,811,813,820,821,827,828,832,831,836,835,824) ~ 6,
+    T ~ NA
+  ))  
+
+results <- list(
+   all_plot_results = all_plot_results,
+   all_ious_results  = all_ious_results
+)
+
+return(results)
+}
+```
+
+Execute function for OOST sets
+```{r}
+oost_aug16 <- evaluate_plot_inundation(
+  year_label = "brood16",
+  mmYYYY = "Aug2016",
+  phdi_yr = "phdi_aug16",
+  oos=T
+)
+
+oost_may22 <- evaluate_plot_inundation(
+  year_label = "2022",
+  mmYYYY = "May2022",
+  phdi_yr = "phdi_may22",
+  oos=T
+)
+
+oost_may24 <- evaluate_plot_inundation(
+  year_label = "2024",
+  mmYYYY = "May2024",
+  phdi_yr = "phdi_may24",
+  oos=T
+)
+
+########
+all_plot_results <- bind_rows(oost_aug16$all_plot_results, oost_may22$all_plot_results, oost_may24$all_plot_results)
+all_iou_results <- bind_rows(oost_aug16$all_ious_results, oost_may22$all_ious_results, oost_may24$all_ious_results)
+
+write_csv(all_plot_results, here(paste0("data/accuracy_assessment/plot_results.csv")))
+write_csv(all_iou_results, here(paste0("data/accuracy_assessment/iou_results.csv")))
+```

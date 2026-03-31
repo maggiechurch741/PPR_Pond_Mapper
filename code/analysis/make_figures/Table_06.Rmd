@@ -1,0 +1,293 @@
+---
+title: "Table 6"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(here)
+library(yardstick)
+library(sf)
+```
+
+So, don't use stratified test plots...
+```{r}
+# load est/obs polygons
+all_sf <- st_read(here("data/accuracy_assessment/all_est_obs_clouds")) 
+
+# load iou results
+iou_results <- read_csv(here(paste0( "data/accuracy_assessment/iou_results.csv"))) |>
+  mutate(size_class = case_when(
+    pond_swx_ha < 0.5  ~ "small (< 0.5 ha)",
+    pond_swx_ha >= 0.5 & pond_swx_ha <= 2 ~ "med (0.5 - 2 ha)",
+    pond_swx_ha > 2    ~ "large (> 2 ha)"
+  )) |>
+  mutate(size_class = factor(size_class, levels=c ("small (< 0.5 ha)", "med (0.5 - 2 ha)",  "large (> 2 ha)"))) |>
+  mutate(model = if_else(source=="postproc10", "ours", source)) |> 
+  mutate(cloud_ratio = 1 - pond_swx_ha_cloudless / pond_swx_ha)
+```
+
+
+# IOU
+```{r}
+# IOU stats from full test set
+t6_a <- iou_results |>
+  filter(cloud_ratio < 0.02)|> #drop ponds with > 2% cloud coverage
+  filter(model != "jrc" & !is.infinite(iou)) |>
+  group_by(model, size_class) |>
+  summarize(
+    mean_iou = round(mean(iou), 2),
+    detected = round(sum(iou > 0) / n() * 100, 0),
+    m_ponds = n(),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = size_class, values_from = c(mean_iou, detected, m_ponds)) 
+
+# get 2016-only (ours and jrc)
+t6_b <- iou_results |>
+  filter(pond_swx_ha != pond_swx_ha_cloudless)  |> # drop ponds with any clouds
+  filter(dataset=="brood16" & model %in% c("ours", "jrc") & !is.infinite(iou)) |>
+  mutate(model = if_else(model == "ours", "ours_16", model)) |> 
+  group_by(model, size_class) |>
+  summarize(
+    mean_iou = round(mean(iou), 2),
+    detected = round(sum(iou > 0) / n() * 100, 0),
+    m_ponds = n(),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = size_class, values_from = c(mean_iou, detected, m_ponds)) 
+
+t6_ab <- bind_rows(t6_a, t6_b) 
+```
+
+# Pond count RMSE
+(this takes a few minutes)
+```{r}
+results_c <- list()
+for(j in c("ours", "dw", "agg", "cons")){
+  
+  # drop plot if it has any clouds
+  cloud_plots <- all_sf |> 
+    filter(type == paste0("clouds_", j)) |>
+    st_drop_geometry() |>
+    distinct(Plot, dataset)
+  
+  # calculate pond-count rmse across plot-surveys
+  results_c[[j]] <- all_sf |> 
+    mutate(size_ha = as.numeric(st_area(geometry))*0.0001,
+           size_class = cut(size_ha, breaks = c(0, 0.5, 2, Inf),
+                        labels = c("small (< 0.5 ha)", "med (0.5 - 2 ha)", "large (> 2 ha)"))) |>
+    st_drop_geometry() |>    
+    filter(type %in% c(paste0("estimated_", j), "observed")) |> 
+    anti_join(cloud_plots, by = c("Plot", "dataset")) |>
+    group_by(Plot, dataset, size_class) |>
+    summarize(
+      pred = sum(type == paste0("estimated_", j)),                         
+      obs  = sum(type == "observed"),                                  
+      .groups = "drop"
+    ) |>
+    group_by(size_class) |>
+    summarize(
+      rmse = round(sqrt(mean((pred - obs)^2, na.rm = TRUE)), 0), 
+      .groups = "drop"
+    ) |>
+    mutate(model = j)
+}
+
+t6_c <- bind_rows(results_c) |>
+  pivot_wider(names_from = size_class, values_from = rmse) |>
+  mutate(model = case_when(
+    model == "cons" ~ "dswe_cons",
+    model == "agg"  ~ "dswe_agg",
+    TRUE            ~ model
+  ))
+
+t6_c
+```
+
+```{r}
+results_d <- list()
+
+for(j in c("ours", "jrc")){
+  
+  # drop plot if it has any clouds
+  cloud_plots <- all_sf |> 
+    filter(dataset=="brood16") |>
+    filter(type == paste0("clouds_", j)) |>
+    st_drop_geometry() |>
+    distinct(Plot, dataset)
+  
+  # calculate pond-count rmse across plot-surveys
+  filtered <- all_sf |> 
+    filter(dataset=="brood16") |>
+    mutate(size_ha = as.numeric(st_area(geometry))*0.0001,
+           size_class = cut(size_ha, breaks = c(0, 0.5, 2, Inf),
+                            labels = c("small (< 0.5 ha)", "med (0.5 - 2 ha)", "large (> 2 ha)"))) |>
+    st_drop_geometry() |>    
+    filter(type %in% c(paste0("estimated_", j), "observed")) |> 
+    anti_join(cloud_plots, by = c("Plot", "dataset"))
+  
+  if(nrow(filtered) == 0) next
+  
+  results_d[[j]] <- filtered |>
+    group_by(Plot, dataset, size_class) |>
+    summarize(
+      pred = sum(type == paste0("estimated_", j)),
+      obs  = sum(type == "observed"),
+      .groups = "drop"
+    ) |>
+    group_by(size_class) |>
+    summarize(
+      rmse = round(sqrt(mean((pred - obs)^2, na.rm = TRUE)), 0),
+      .groups = "drop"
+    ) |>
+    mutate(model = j)
+}
+
+t6_d <- bind_rows(results_d) |>
+  pivot_wider(names_from = size_class, values_from = rmse)
+
+t6_d
+```
+
+Combine it all!
+```{r}
+t_cd <- bind_rows(t6_c, t6_d) 
+
+t6 <- left_join(t6_ab, t_cd) |>
+  mutate(model = factor(model, levels = c("ours", "dswe_cons", "dswe_agg", "dw", "ours_16", "jrc"))) |>
+  arrange(model) |>
+  relocate(starts_with("m_"), .after = last_col())
+
+t6
+```
+
+```{r}
+write_csv(t6, here("figures/R/Table_06.csv"))
+```
+
+
+######### OLD ######### 
+# Pond count RMSE
+(this takes a few minutes)
+```{r}
+results_c <- list()
+
+for(j in c("ours", "dw", "agg", "cons")){
+  
+  ponds_est <- all_sf |> filter(type==paste0("estimated_", j)) |> select(Plot, dataset, type)
+  ponds_obs <- all_sf |> filter(type=="observed")              |> select(Plot, dataset, type)
+  clouds    <- all_sf |> filter(type==paste0("clouds_", j))    |> select(Plot, dataset, type)
+  
+  ##################################
+  # keep only ponds with NO cloud overlap
+  ponds_obs_cloudless <- list()
+  ponds_est_cloudless <- list()
+  
+  for(i in c("brood16", "2022", "2024")){
+    clouds_i    <- clouds    |> filter(dataset == i) |> st_union() |> st_make_valid()
+    ponds_obs_i <- ponds_obs |> filter(dataset == i) |> st_make_valid()
+    ponds_est_i <- ponds_est |> filter(dataset == i) |> st_make_valid()
+    
+    ponds_obs_cloudless[[i]] <- ponds_obs_i |> filter(!lengths(st_intersects(ponds_obs_i, clouds_i)))
+    ponds_est_cloudless[[i]] <- ponds_est_i |> filter(!lengths(st_intersects(ponds_est_i, clouds_i)))
+  }
+  
+  ponds_obs_cloudless <- bind_rows(ponds_obs_cloudless)  |>
+     mutate(size_ha = as.numeric(st_area(geometry))*0.0001,
+            size_class = cut(size_ha, breaks = c(0, 0.5, 2, Inf),
+                             labels = c("small (< 0.5 ha)", "med (0.5 - 2 ha)", "large (> 2 ha)")))
+  
+  ponds_est_cloudless <- bind_rows(ponds_est_cloudless) |>
+     mutate(size_ha = as.numeric(st_area(geometry))*0.0001,
+            size_class = cut(size_ha, breaks = c(0, 0.5, 2, Inf),
+                             labels = c("small (< 0.5 ha)", "med (0.5 - 2 ha)", "large (> 2 ha)")))
+  
+  df <- bind_rows(
+    st_drop_geometry(ponds_obs_cloudless), 
+    st_drop_geometry(ponds_est_cloudless)
+  )
+  ##################################
+  
+  results_c[[j]] <- df |>
+    group_by(Plot, dataset, size_class) |>
+    summarize(pred = sum(type == paste0("estimated_", j)),
+              obs  = sum(type == "observed"),
+              .groups = "drop") |>
+    group_by(size_class) |>
+    summarize(rmse = round(sqrt(mean((pred - obs)^2, na.rm = TRUE)), 0), .groups = "drop") |>
+    mutate(model = j)
+}
+
+t6_c <- bind_rows(results_c) |>
+  pivot_wider(names_from = size_class, values_from = rmse) |>
+  rename_with(~ paste0("rmse_", .), -model) |>
+  mutate(model = case_when(
+    model=="cons" ~ "dswe_cons",
+    model=="agg" ~ "dswe_agg",
+    T ~ model
+  ))
+
+t6_c 
+```
+
+2016 (ours and jrc) pond count rmse
+```{r}
+results_d <- list()
+
+for(j in c("ours", "jrc")){
+  
+  ponds_est <- all_sf |> filter(type==paste0("estimated_", j)) |> select(Plot, dataset, type)
+  ponds_obs <- all_sf |> filter(type=="observed")              |> select(Plot, dataset, type)
+  clouds    <- all_sf |> filter(type==paste0("clouds_", j))    |> select(Plot, dataset, type)
+  
+  ##################################
+  # keep only ponds with NO cloud overlap
+  ponds_obs_cloudless <- list()
+  ponds_est_cloudless <- list()
+  
+  for(i in c("brood16")){
+    clouds_i    <- clouds    |> filter(dataset == i) |> st_union() |> st_make_valid()
+    ponds_obs_i <- ponds_obs |> filter(dataset == i) |> st_make_valid()
+    ponds_est_i <- ponds_est |> filter(dataset == i) |> st_make_valid()
+    
+    ponds_obs_cloudless[[i]] <- ponds_obs_i |> filter(!lengths(st_intersects(ponds_obs_i, clouds_i)))
+    ponds_est_cloudless[[i]] <- ponds_est_i |> filter(!lengths(st_intersects(ponds_est_i, clouds_i)))
+  }
+  
+  ponds_obs_cloudless <- bind_rows(ponds_obs_cloudless)  |>
+     mutate(size_ha = as.numeric(st_area(geometry))*0.0001,
+            size_class = cut(size_ha, breaks = c(0, 0.5, 2, Inf),
+                             labels = c("small (< 0.5 ha)", "med (0.5 - 2 ha)", "large (> 2 ha)")))
+  
+  ponds_est_cloudless <- bind_rows(ponds_est_cloudless) |>
+     mutate(size_ha = as.numeric(st_area(geometry))*0.0001,
+            size_class = cut(size_ha, breaks = c(0, 0.5, 2, Inf),
+                             labels = c("small (< 0.5 ha)", "med (0.5 - 2 ha)", "large (> 2 ha)")))
+  
+  df <- bind_rows(
+    st_drop_geometry(ponds_obs_cloudless), 
+    st_drop_geometry(ponds_est_cloudless)
+  )
+  ##################################
+  
+  results_d[[j]] <- df |>
+    group_by(Plot, dataset, size_class) |>
+    summarize(pred = sum(type == paste0("estimated_", j)),
+              obs  = sum(type == "observed"),
+              .groups = "drop") |>
+    group_by(size_class) |>
+    summarize(rmse = round(sqrt(mean((pred - obs)^2, na.rm = TRUE)), 0), .groups = "drop") |>
+    mutate(model = j)
+}
+
+t6_d <- bind_rows(results_d) |>
+  pivot_wider(names_from = size_class, values_from = rmse) |>
+  rename_with(~ paste0("rmse_", .), -model) |>
+  mutate(model = if_else(model=="ours", "ours_16", model))
+
+t6_d
+```
+

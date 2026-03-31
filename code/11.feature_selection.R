@@ -8,7 +8,7 @@ library(future)
 library(here)
 
 # Author: Maggie Church
-# Updated: 2026-02-19
+# Updated: 2026-02-21
 
 # Description: This script selects a parsimonious, uncorrelated feature set
 # 
@@ -16,25 +16,30 @@ library(here)
 #
 # Steps: 
 #   1. run cross-validated recursive feature elimination (CV-RFE) to get the top feature
-#   2. remove all features that are >0.9 correlated with the top feature
+#   2. remove all features that are >0.88 correlated with the top feature
 #   3. run CV-RFE again to get the 2nd top feature
 #   4. remove features correlated with it
 #   5. etc etc until performance plateaus
+# The comments at the bottom of this script document this process.
 # 
-# Outputs: ... selected features
+# Outputs: results of cv-rfe runs
 #                                                                                                                                            
 # Note: I could programatically find the reduced feature set, but I'd rather do a semi-manual selection 
-# Note: I actually run cv_rfe in an HPC, save the results to csv, then remove features correlated with the most recently selected feature. Below is a sort of record of that process
-# Note: the 0.9 correlation threshold was arbitrary
-#
+# Note: Ideally I'd run repetitions, since this feature selection process has some stochasticity,
+#       but with 57 features and 9 folds it already takes a very long time
+# Note: the 0.88 correlation threshold was arbitrary
+# Note: I ran this in an HPC, saving the results of each cv-rfe run to csv (this 
+#       uses all nodes available, so be careful if running on a desktop)
 
+# 
+output_folder <- here("data/intermediate/feature_selection/")
+stopifnot(dir.exists(output_folder))
 
 # Read in training data
-train <- read_csv(here("data/train_test_data/balanced_training/training_2wk_200pt_bal.csv")) |> 
-  filter(!is.na(NDRE) & !is.na(NDMI2))
+train <- read_csv(here("data/train_test_data/balanced_training/training_bal.csv"))
 
 # full featureset
-featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
+full_featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
                 "sp30d_2","red","sp30d_1","nir","wt30_10","VVVH_rt",
                 "wt90_10","green","z_2","NDWI","z_1","ABWI","h90_100","VH",
                 "TCB","NDMI1","blue","h30_100","mNDWI2","mNDWI1","TCG",
@@ -44,22 +49,23 @@ featureset <- c("VV","swir1","TCW","swir2","NDMI2","spei30d","NDRE", "NDVI",
                 "EVI3b", "EVI2b") 
 
 #######################################################################
-# function to find features that are correlated > 0.9
+# function to find features that are correlated > 0.88
 find_corr <- function(dat, featureset, var){
-  dat |> 
-    select(all_of(featureset)) |>
-    cor() |> 
-    as.data.frame() |> 
-    select(var) |> 
-    filter(abs(.) > 0.9) |>
-    filter(rownames(.) != var) |> 
-    rownames()
+  cor_mat <- dat |>
+    dplyr::select(all_of(featureset)) |>
+    cor()
+  
+  cor_vals <- cor_mat[, var]
+  
+  names(cor_vals)[
+    abs(cor_vals) > 0.88 &
+      names(cor_vals) != var
+  ]
 }
 
 #######################################################################
-# function to run cross-validated recursive feature elimination 
-
-cv_rfe <- function(df){
+# function to run cross-validated recursive feature elimination (in parallel)
+cv_rfe <- function(df, feats, runnum){
   set.seed(123) 
   
   # set up task
@@ -113,44 +119,83 @@ cv_rfe <- function(df){
   fselector$optimize(instance)
   
   # get the RFE archive
-  rfe = as.data.table(instance$archive)[!is.na(iteration), ]
+  rfe = as.data.table(instance$archive)[!is.na(iteration), ] |>
+    mutate(
+      n_feat = lengths(features),
+      importance = sapply(importance, function(x) paste(x, collapse = ",")),
+      features   = sapply(features, function(x) paste(x, collapse = ",")),
+      n_features = as.integer(sapply(n_features, function(x) paste(x, collapse = ","))),
+      rep = r
+    )
+  
+  # save to disk, for our records
+  write_csv(rfe, here(paste0(output_folder,"rfe", runnum,".csv")))
+  
+  # turn off parallel processing
+  future::plan("sequential")
   
   return(rfe)
 }
 
+
 ########## BELOW IS A RECORD OF MY FEATURE SELECTION PROCESS ########## 
-# # first selected var is swir1
-# swir1_corr <- find_corr(train, featureset1, var="swir1")
+# I started by tossing spei30d (min, max, mean), topo vars, min palmer-z (min), 
+# because their importance was so low, and they were always tossed first in previous
+# iterations of this process. It saves a lot of time to widdle down the featureset 
+
+# ########## 1. 
+# # Run feature selection - top var is swir1
+# rfe0 <- cv_rfe(train, full_featureset, 0)
 # 
-# featureset2 <- featureset1 |>
-#   setdiff(swir1_corr) 
+# # Find features correlated with the top var
+# swir1_corr <- find_corr(train, full_featureset, var="swir1")
+# 
+# # Remove features correlated with the top var
+# featureset1 <- full_featureset |> setdiff(swir1_corr) # AWEI, AWEIsh, MIFW, TCB, TCW, swir2
+
+# ########## 2.
+# # Run feature selection - top 2 vars are swir1 and NDRE
+# rfe1 <- cv_rfe(train, featureset1, 1)
 #
-# # second selected var is NDRE
-# ndre_corr <- find_corr(train, featureset2, var="NDRE") # none
+# # Find features correlated with the top var - there were none
+# ndre_corr <- find_corr(train, featureset1, var="NDRE") # none 
 #   
-# # third + fourth selected var is a tie between TCG and WTI
-# tcg_corr <- find_corr(train, featureset2, var="TCG") # none
-# wti_corr <- find_corr(train, featureset2, var="WTI")
+# # In that case, we can pick the 3rd var now: it's a tie between TCG and WTI
+# tcg_corr <- find_corr(train, featureset1, var="TCG") # none
+# wti_corr <- find_corr(train, featureset1, var="WTI") # red, nir, green, blue, RE1, RE2, RE3, SRBI
 # 
+# # Remove features correlated with WTI 
+# featureset2 <- featureset1 |>  setdiff(wti_corr) 
+
+# ########## 3.
+# # Run feature selection: ok now we've got swir1, NDRE, TCG, WTI annnnddddd a tie between IFW and VH
+# rfe2 <- cv_rfe(train, featureset2, 2)
+# 
+# # I think we can just go with both
+# vh_corr <- find_corr(train, featureset2, var="VH")    # VV, VV/VH
+# ifw_corr <- find_corr(train, featureset2, var="IFW")  # DVI, SAVI, EVI3b, EVI2b
+# 
+# # Remove features correlated with VH and IFW
 # featureset3 <- featureset2 |>
-#   setdiff(wti_corr) 
-# 
-# # fifth + sixth selected vars are IFW and VH
-# vh_corr <- find_corr(train, featureset3, var="VH") 
-# ifw_corr <- find_corr(train, featureset3, var="IFW") 
-# 
-# featureset4 <- featureset3 |>
 #   setdiff(vh_corr) |>
 #   setdiff(ifw_corr) 
+#
+# ########## 4.
+# # Run feature selection: so now we got swir1, NDRE, TCG, WTI, IFW, VH annnddd... BU3!
+# rfe3 <- cv_rfe(train, featureset3, 3)
+#
+# # Seventh selected var is BU3 
+# bu3_corr <- find_corr(train, featureset3, var="BU3") # none
+#
+# # Eighth is TVI
+# tvi_corr <- find_corr(train, featureset3, var="TVI") # OSAVI
 # 
-# # seventh selected var is BU3 
-# # eighth is TVI
-# bu3_corr <- find_corr(train, featureset4, var="BU3") 
-# tvi_corr <- find_corr(train, featureset4, var="TVI") 
+# featureset4 <- featureset3 |> setdiff(tvi_corr) 
+#
+# ########## 5.
+# # Run feature selection: swir1, NDRE, TCG, WTI, IFW, VH, BU3, TVI annddd - no more, lets be done!
+# rfe4 <- cv_rfe(train, featureset4, 4)
 # 
-# featureset5 <- featureset4 |>
-#   setdiff(tvi_corr) 
-
-feats <- featureset
-
+# # ok at this point, there's no advantage to having more features! We'll go with those 8 features
+# # I did keep going through rfe until only an uncorrelated featureset remained... these 8 features remained at the top
 

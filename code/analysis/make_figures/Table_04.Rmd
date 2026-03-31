@@ -1,0 +1,57 @@
+---
+title: "Table 4"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+```{r}
+library(tidyverse)
+library(here)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+```
+
+Stratified size, edge, ndvi interactions
+```{r}
+oe_strata <- pixel_results |>
+  mutate(
+    ndvi_class = case_when(
+      NDVI < 0 ~  "ndvi < 0", 
+      NDVI >= 0 & NDVI < 0.4 ~ "ndvi 0-0.4",
+      NDVI >= 0.4 ~ "ndvi > 0.4"),
+    size_class = case_when(
+        area_ha < 0.5 ~ "small (< 0.5 ha)",
+        area_ha >= 0.5 & area_ha <= 2 ~ "med (0.5 - 2 ha)",
+        area_ha > 2 ~ "large (> 2 ha)"),
+    edge_class = case_when(dist_to_edge_m <= 20 ~ "<= 20m",
+                           dist_to_edge_m > 20 ~ "> 20m")
+  ) |>
+  filter(true_label=="wet") |> 
+  group_by(ndvi_class, size_class, edge_class) |>
+  reframe(
+    TP = sum(postproc10 == "water", na.rm=T),
+    FN = sum(postproc10 == "nonwater", na.rm=T),
+    OE = 1-(TP / (TP + FN)),
+    nwater_pixels = TP+FN,
+    nponds = n_distinct(pond_id, dataset),
+    area = round(sum(area_ha)*0.0001)
+  ) |> 
+  filter(!is.na(OE)) |> 
+  mutate(OE = round(OE, 2))
+
+# gt table
+t4 <- oe_strata |> 
+  filter(!is.na(ndvi_class) & !is.na(edge_class)) |> 
+  mutate(ndvi_class = factor(ndvi_class, levels=c("ndvi < 0", "ndvi 0-0.4", "ndvi > 0.4"))) |> 
+  arrange(ndvi_class, edge_class, desc(size_class)) |> 
+  select(ndvi_class, size_class, edge_class, OE) |> 
+  pivot_wider(names_from = c(edge_class,size_class), values_from = OE, names_sep   = "__") 
+
+t4
+```
+
+```{r}
+write_csv(t4, here("figures/R/Table_04.csv"))
+```

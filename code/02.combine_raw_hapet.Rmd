@@ -329,7 +329,7 @@ I might have picked a more descriptive name if I had forseen that I'd need to sa
 # filter ponds < 20x20m
 allPonds_gt400m2 <- allPonds4 |> filter(area_m >= 400)
 
-st_write(allPonds_gt400m2, here("data", "allPonds", "allPond.shp"),  append=F)
+#st_write(allPonds_gt400m2, here("data", "allPonds", "allPond.shp"),  append=F)
 ```
 
 # 4. Export allPond_all dataset (used for testing)
@@ -341,9 +341,9 @@ I'm not going to merge ponds for allPonds_gt400m2, because I only realized this 
 
 Note that HAPET made clean splits for 2019+, but added 1 pixel of separation for splits prior to 2019. Those are harder to address (so I don't).
 ```{r}
-datasets <- allPonds4 %>% 
-  st_drop_geometry() %>% # speeds up the next part
-  distinct(dataset) %>% 
+datasets <- allPonds4 |> 
+  st_drop_geometry() |> # speeds up the next part
+  distinct(dataset) |> 
   pull()
 
 # initialize empty vector
@@ -351,38 +351,52 @@ out <- vector("list", length(datasets))
 
 for (i in seq_along(datasets)) {
   
-  ponds_yr <- allPonds4 %>% 
-    filter(dataset == datasets[i]) %>% 
+  ponds_yr <- allPonds4 |> 
+    filter(dataset == datasets[i]) |> 
     st_cast("POLYGON") 
   
-  # Compute touches ONCE on the full dataset
-  touch_list <- st_touches(ponds_yr)
-  touch_counts <- lengths(touch_list)
-  
-  # Split dataset
-  touching     <- ponds_yr[touch_counts > 0, ]
-  non_touching <- ponds_yr[touch_counts == 0, ]
-  
-  # Build graph ONLY on touching polygons
-  touch_graph <- st_touches(touching)
-  g <- igraph::graph_from_adj_list(touch_graph)
-  components <- igraph::components(g)$membership
-  
-  # Union touching polygons by connected component
-  touching_union <- touching %>%
-    mutate(group = components) %>%
-    summarise(
-      Plot = first(Plot),
-      dataset = first(dataset),
-      geometry = st_union(geometry),
-      .groups = "drop"
-    )
-  
-  # write
-  out[[i]] <- bind_rows(touching_union, non_touching)
+  out[[i]] <- purrr::map_dfr(unique(ponds_yr$Plot), function(pid) {
+    
+    ponds_plot <- ponds_yr |>
+      filter(Plot == pid) |>
+      st_make_valid() |>                          # fix invalid geometries
+      subset(!st_is_empty(geometry))              # drop any that become invalid after fixing
+    
+    # touching polygons
+    true_touching <- ponds_plot |>
+      filter(lengths(st_touches(ponds_plot)) > 0)
+    
+    if (nrow(true_touching) > 0) {
+      touch_graph <- st_touches(true_touching)
+      g <- graph_from_adj_list(touch_graph)
+      components <- components(g)$membership
+      
+      hapet_touch_unioned <- true_touching |>
+        mutate(group = components) |>
+        group_by(group) |>
+        summarise(
+          Plot = first(Plot),
+          dataset = first(dataset),
+          geometry = st_union(geometry),
+          .groups = "drop"
+        ) |>
+        select(Plot, dataset, geometry)
+    } else {
+      hapet_touch_unioned <- true_touching |>
+        select(Plot, dataset, geometry)
+    }
+    
+    # non-touching
+    true_non_touching <- ponds_plot |>
+      filter(lengths(st_touches(ponds_plot)) == 0) |>
+      select(Plot, dataset, geometry)
+    
+    # combine
+    bind_rows(hapet_touch_unioned, true_non_touching)
+  })
 }
 
-allPonds_clean <- bind_rows(out) %>% 
+allPonds_clean <- bind_rows(out) |> 
   mutate(rownum = row_number()) # re-do once more
 
 st_write(allPonds_clean, here("data", "allPonds_all", "allPond_all.shp"),  append=F)

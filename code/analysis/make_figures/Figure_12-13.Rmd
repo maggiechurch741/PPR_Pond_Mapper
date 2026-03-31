@@ -1,0 +1,200 @@
+---
+title: "Fig 12 + 13: Limitations OE"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(cowplot)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+```
+
+```{r}
+# Dist to edge breaks
+dist_breaks <- seq(0, 4000, by = 10)
+dist_mids <- head(dist_breaks, -1) + diff(dist_breaks)/2
+
+binned_dist <- pixel_results |>
+  mutate(
+    dist_bin = cut(dist_to_edge_m, breaks = dist_breaks, include.lowest = TRUE),
+    dist_mid = dist_mids[as.numeric(dist_bin)]
+  ) |>
+  filter(!is.na(postproc10)) |> 
+  group_by(dist_mid) |>
+  reframe(
+    TN = sum(true_label == "dry" & postproc10 == "nonwater"),
+    TP = sum(true_label == "wet" & postproc10 == "water"),
+    FP = sum(true_label == "dry" & postproc10 == "water"),
+    FN = sum(true_label == "wet" & postproc10 == "nonwater"),
+    "OE" = 1-(TP / (TP + FN)),
+    "CE"= 1-(TP / (TP + FP)),
+    "OA"=(TP+TN)/(TP+TN+FP+FN)
+  ) |>
+  pivot_longer(cols = c("OE", "CE", "OA"), names_to = "metric", values_to = "value") 
+
+wet_df <- pixel_results |> filter(true_label == "wet")
+
+# Determine scaling factor for histogram to overlay on same plot
+scale_factor <- max(binned_dist$value, na.rm=T) / max(hist(pixel_results$dist_to_edge_m, plot=FALSE)$counts) * 2
+
+binned_dist_forplot <- binned_dist |>
+  filter(metric=="OE") |>
+  filter(TP+FP+FN > 200)
+
+# x-axis distance max
+max_dist <- binned_dist_forplot |> summarize(max(dist_mid, na.rm=T)) |> pull()
+
+b_dist <- ggplot() +
+  # Histogram in background, scaled, with a legend entry
+  geom_histogram(
+    data = wet_df,
+    aes(x = dist_to_edge_m, y = after_stat(count) * scale_factor, fill = "Distribution of water points by distance to pond edge (m)"),
+    bins = 20,
+    alpha = 0.3
+  ) +
+  # Sensitivity/precision lines (primary y-axis)
+  geom_line(data = binned_dist_forplot, aes(x = dist_mid, y = value, color = metric), size = 1) +
+  scale_fill_manual(
+    name = "",  # legend title for histogram
+    values = c("Distribution of water points by distance to pond edge (m)" = "grey70"),
+    labels = "Distribution of water\npixels by distance \nto pond edge (m)",
+    guide = guide_legend(order = 2)
+  ) +
+  scale_color_manual(
+    name = "",
+    values = c("OE" = "#E69F00"),
+    guide = guide_legend(order = 1)
+  ) +
+  scale_y_continuous(
+    name = "OE",
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = "Distance to pond edge (m)",
+    title = "Model Omission Error (OE) by \ndistance to pond edge"
+  ) +
+  xlim(0, max_dist) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 18),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text  = element_text(size = 14),
+    plot.title = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text  = element_text(size = 18)
+  )
+
+# add a little room on the right
+b_dist_margin <- b_dist + theme(plot.margin = margin(t = 10, r = 25, b = 5, l = 5))
+
+# overlay the "b" label without resizing the plot
+p_dist <- ggdraw(b_dist_margin) +
+    draw_plot_label("b", x = 0, y = 1, hjust = -0.5, vjust = 1,
+                    size = 18, fontface = "bold")
+```
+
+```{r}
+# NDVI breaks
+ndvi_breaks <- seq(-1, 1, by = 0.1)
+ndvi_mids   <- seq(-0.95, 0.95, by = 0.1)
+
+binned_ndvi <- pixel_results |>
+  mutate(
+    ndvi_bin = cut(NDVI, breaks = ndvi_breaks, include.lowest = TRUE),
+    ndvi_mid = ndvi_mids[as.numeric(ndvi_bin)]
+  ) |>
+  filter(!is.na(postproc10)) |> 
+  group_by(ndvi_mid) |>
+  reframe(
+    TN = sum(true_label == "dry" & postproc10 == "nonwater"),
+    TP = sum(true_label == "wet" & postproc10 == "water"),
+    FP = sum(true_label == "dry" & postproc10 == "water"),
+    FN = sum(true_label == "wet" & postproc10 == "nonwater"),
+    "OE" = 1-(TP / (TP + FN)),
+    "CE"= 1-(TP / (TP + FP)),
+    "OA"=(TP+TN)/(TP+TN+FP+FN)
+  ) |>
+  pivot_longer(cols = c("OE", "CE", "OA"), names_to = "metric", values_to = "value") 
+
+wet_df <- pixel_results |> 
+  filter(true_label == "wet") |> 
+  filter(!is.na(NDVI), NDVI >= -1, NDVI <= 1)
+
+# Determine scaling factor for histogram to overlay on same plot
+scale_factor <- max(binned_ndvi$value, na.rm=T) / max(hist(pixel_results$NDVI, plot=FALSE)$counts, na.rm=T) *2 
+
+binned_ndvi_forplot <- binned_ndvi |>
+  filter(metric=="OE") |>
+  filter(TP+FP+FN > 200)
+
+b_ndvi <- ggplot() +
+  # Histogram in background, scaled, with a legend entry
+  geom_histogram(
+    data = wet_df,
+    aes(x = NDVI, y = after_stat(count) * scale_factor, fill = "Distribution of water points by NDVI"), 
+    bins = 20,
+    alpha = 0.3
+  ) +
+  # Sensitivity/precision lines (primary y-axis)
+  geom_line(data = binned_ndvi_forplot, aes(x = ndvi_mid, y = value, color = metric), size = 1) +
+  scale_fill_manual(
+    name = "",  # legend title for histogram
+    values = c("Distribution of water points by NDVI" = "grey70"),
+    labels = "Distribution of water\npixels by NDVI",
+    guide = guide_legend(order = 2)
+  ) +
+  scale_color_manual(
+    name = "",
+    values = c("OE" = "#E69F00"),
+    guide = guide_legend(order = 1)
+  ) +
+  scale_y_continuous(
+    name = "OE",
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = "NDVI",
+    title = "Model Omission Error (OE) by NDVI",
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 18),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text  = element_text(size = 14),
+    plot.title = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text  = element_text(size = 18)
+  )
+
+# add a little room on the right
+b_ndvi_margin <- b_ndvi + theme(plot.margin = margin(t = 10, r = 25, b = 5, l = 5))
+
+# overlay the "b" label without resizing the plot
+p_ndvi <- ggdraw(b_ndvi_margin) +
+    draw_plot_label("b", x = 0, y = 1, hjust = -0.5, vjust = 1,
+                    size = 18, fontface = "bold")
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_12b.png"),
+       plot = p_dist,
+       width = 650/96, 
+       height = 400/96, 
+       units = "in",
+       dpi = 1000)
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_13b.png"),
+       plot = p_ndvi,
+       width = 650/96, 
+       height = 400/96, 
+       units = "in",
+       dpi = 1000)
+```

@@ -1,6 +1,6 @@
 # add more VIs
 moreVIs <- function(df){ 
-  df %>% 
+  df |> 
     mutate(
       NDVI = (nir-red)/(nir+red),
       NDWI = (green-nir)/(green+nir),

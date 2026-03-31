@@ -1,0 +1,371 @@
+---
+title: "Get pixel-level accuracy metrics"
+author: "Maggie Church"
+created: "2025-06-26"
+updated: "2026-03-10"
+---
+
+**Description**: For each pixel within the historic wetland footprint across test plot-surveys,
+extract observed wetland status and predictions from five remote sensing products (our PPM, 
+Dynamic World, DSWE aggressive, DSWE conservative, JRC), along with covariates used in 
+accuracy assessment (distances to pond edge and centroid, ndvi, phdi).
+
+**Inputs**:
+-  PPJV administrative boundary shapefile 
+-  Plot boundary shapefile (created in script #1)
+-  HAPET pond boundaries for all ponds (including ones < 0.04 ha) with split polygons merged (script #2)
+-  Test plot-survey ids 
+-  County-level PHDI from NOAA
+-  Historic wetland footprint (exported from GEE)
+-  Our model's probability raster (for AUC calculation) and post-processed classification raster, for each test year (exported from GEE)
+-  Dynamic World, DSWE, NDVI, and JRC prediction rasters, for each test year (exported from GEE)
+-  Crosswalk mapping raster values to class labels
+
+**Steps**:
+1. For each test plot-survey, identify pixels within the historic wetland footprint
+2. Spatially join observed wet/dry status from HAPET pond polygons
+3. Extract predicted class from each remote sensing product
+4. Calculate each pixel's distance to pond edge and pond centroid
+5. Extract NDVI value
+6. Join PHDI via spatial join
+7. Combine across all survey dates and write to CSV
+
+**Outputs**:
+- `data/accuracy_assessment/pixel_results.csv`: ~8M rows for the out-of-sample test set
+
+```{r, message=F}
+library(tidyverse)
+library(here)
+library(sf)
+library(terra)
+
+set.seed(123)
+```
+
+# Load data and helper function
+```{r, message=F}
+# Load PPR boundary
+ppr <- st_read(here("data", "boundaries", "PPJV")) |> st_transform(32614)
+plots <- st_read(here("data", "allPlots")) 
+ponds <- st_read(here("data", "allPonds_all"))
+
+# Add pond size 
+ponds <- ponds |>
+  mutate(area_ha = as.numeric(st_area(geometry))*0.0001) |>
+  st_transform(4326) #ok now get into wgs84
+
+# get test plots and time periods (we just need plot IDs)
+test_plot_ids <- read_csv(here("data/train_test_data/test_plot_surveys.csv")) |> 
+  distinct(plot_id) |> 
+  pull()
+
+# Load helper function to calculate PHDI
+source(here("code/analysis/helper_functions/get_phdi.R")) 
+```
+
+# Define raster codes
+```{r}
+crosswalks <- readRDS(here("data/gee_exports/product_codes"))
+
+crosswalks <- lapply(crosswalks, function(cw) {
+  cw$value <- as.numeric(cw$value)
+  cw
+})
+```
+
+# Quick function to get utm zone epsg from epsg4326 sf plot polygon
+```{r}
+epsg_code_from_wgs <- function(plot_vect){
+  # Put into projected crs for buffering - find the best UTM zone
+  plot_sf <- st_as_sf(plot_vect)
+  plot_centroid <- st_coordinates(st_centroid(plot_sf))
+  lon <- plot_centroid[1]
+  lat <- plot_centroid[2]
+  zone <- floor((lon + 180) / 6) + 1
+  epsg <- ifelse(lat >= 0, 32600 + zone, 32700 + zone)
+  return(epsg)
+}
+```
+
+# Plot to test_box lookup
+```{r}
+test_box_lookup <- tribble(
+  ~Plot, ~test_box,
+  944, 1, 950, 1, 996, 1, 992, 1, 993, 1, 937, 1, 930, 1, 940, 1, 915, 1, 905, 1,
+  154, 2, 120, 2, 119, 2, 155, 2, 601, 2, 118, 2, 343, 2,
+  997, 2, 998, 2, 999, 2, 1000, 2, 1001, 2, 1002, 2, 1003, 2, 1004, 2,
+  768, 3, 620, 3, 204, 3, 280, 3, 281, 3, 202, 3, 201, 3, 198, 3, 282, 3, 283, 3,
+  313, 4, 312, 4, 272, 4, 271, 4, 269, 4, 266, 4, 265, 4, 262, 4, 263, 4, 264, 4, 268, 4, 267, 4,
+  502, 5, 69, 5, 44, 5, 178, 5, 45, 5, 50, 5, 521, 5, 340, 5, 177, 5, 416, 5, 417, 5, 621, 5, 414, 5, 412, 5,
+  737, 6, 249, 6, 746, 6, 253, 6, 250, 6, 767, 6, 803, 6, 804, 6, 809, 6, 811, 6, 813, 6, 820, 6, 821, 6, 827, 6, 828, 6, 832, 6, 831, 6, 836, 6, 835, 6, 824, 6
+)
+```
+
+# Helper: extract a binary prediction raster to points, rename result column
+```{r}
+extract_prediction <- function(rast, 
+                               source, 
+                               fc) {
+  cw <- crosswalks[[source]]
+  levels(rast) <- data.frame(ID = cw$value, category = cw$class)
+  terra::extract(rast, fc, xy = FALSE) |>
+    rename(!!source := category) |>
+    select(-ID)
+}
+```
+
+# Function to get pixel-based true + predicted values
+For each (10-m) pixel within a test plot-survey and (1) within the historic wetland footprint, get: 
+ (2) observed HAPET value + attributes
+ (3) estimated values (our model, dw, dswe, gsw)
+ (4) pixel distance to pond centroid and pond edge
+ (5) NDVI 
+ (6) PHDI
+
+A note on the crs decisions:
+  In this code, I avoid re-projecting rasters. I simply extract their values to the plot_pixels point collection 
+      The wetlandFootprint and our PPM predictions are in utm14. Maybe that wasn't ideal, but it's not worth redoing.
+      The other products' predictions and NDVI are in wgs84
+  However, I do reproject observed ponds when calculating distances, using the most appropriate utm zone for that plot
+```{r}
+run_plot_extraction <- function(mmyy, plot_ids=test_plot_ids){
+  
+  # Define the mapping for dataset_label
+  dataset_lookup <- c(
+    "May24" = "2024",
+    "May22" = "2022",
+    "Aug16" = "brood16"
+  )
+
+  # Get labels for this mmyy
+  label <- paste0(substr(mmyy, 1, 3), "20", substr(mmyy, 4, 5))  # e.g. May22 -> May2022
+  dataset_label <- dataset_lookup[[mmyy]]            
+  phdi_yr <- paste0("phdi_", tolower(mmyy))                      # e.g. May22 -> phdi_may22
+  
+  # Get historic wetland footprint
+  wetlandFootprint <- rast(here("data/gee_exports/gee_rasters/possibilityLayer/possibilityLayer.tif"))
+  
+  # Read in extra files
+  our_probability_rast <- rast(here(paste0("data/gee_exports/predicted_rasters/processed/probabilities/", label, ".tif")))
+  postproc10_rast      <- rast(here(paste0("data/gee_exports/predicted_rasters/processed/smooth10m/", label, ".tif")))
+  dw_rast              <- rast(here(paste0("data/gee_exports/gee_rasters/dynamicWorld/processed/", label, ".tif")))
+  dswe_agg_rast        <- rast(here(paste0("data/gee_exports/gee_rasters/dswe_aggressive/processed/", label, ".tif")))
+  dswe_cons_rast       <- rast(here(paste0("data/gee_exports/gee_rasters/dswe_conservative/processed/", label, ".tif")))
+  ndvi_files           <- list.files(here(paste0("data/gee_exports/gee_rasters/ndvi/processed/", label)), pattern = "\\.tif$", full.names = TRUE)
+  jrc_path             <- here(paste0("data/gee_exports/gee_rasters/jrc/processed/", label, ".tif"))
+  if (file.exists(jrc_path)) jrc_rast <- rast(jrc_path)
+  
+  # limit to ponds within the year
+  ponds_yr <- ponds |> filter(dataset == dataset_label)
+
+  # limit to test plots 
+  ponds_yr <- ponds_yr |> filter(Plot %in% plot_ids)
+  plots_yr <- plots |> filter(Plot %in% plot_ids)
+  
+  ###################################################
+  # initialize empty list
+  results_list <- list()
+  
+  # Loop through each plot
+  for(i in 1:nrow(plots_yr)) {
+      
+      # Load plot 
+      plot_sf <- plots_yr[i,]
+      plot <- vect(plot_sf)
+      plot_utm <- plot |> project("EPSG:32614")   
+      
+      plot_id <- plot$Plot
+      
+      epsg <- epsg_code_from_wgs(plot_sf)
+      
+     ############################    
+      # Get observed ponds
+      # pond and plot layers align better when using WGS84 than UTM14
+      true_wet <- ponds_yr |>
+        filter(Plot == plot_id) |>
+        st_intersection(plot_sf) |> 
+        mutate(ID = row_number()) |> # need this later, to match to prob_raster extraction
+        select(-Plot.1) |>
+        st_make_valid() |> 
+        filter(!sf::st_is_empty(geometry))
+
+      # Skip if no observed ponds observed in this plot-survey
+      if (nrow(true_wet) == 0 || all(st_is_empty(true_wet))) {
+        message(paste("Skipping plot", plot_id, "- pond geometry is empty"))
+        next
+      }
+      
+       # If there were observations for this plot-survey, proceed
+       if (nrow(true_wet) > 0) {
+         
+         print(paste("processing plot", plot_id, "- survey", mmyy))
+         
+          # Buffer 10m to avoid weird slivers (use utm14 for this, then put back into wgs84)
+          plot_extent_utm <- terra::buffer(plot_utm, width = -10) 
+          plot_extent <- plot_extent_utm |> project("EPSG:4326") 
+          
+         ###################
+          # 1. Get a feature collection of points to compare predictions to observations: 10-m pixel centroids from historic wetland layer
+          plot_pixels_utm <- crop(wetlandFootprint, plot_extent_utm) |>  
+            clamp(lower = 0, upper = 1, values = FALSE) |>                 
+            as.points() |>
+            st_as_sf() |>
+            filter(possiblyWet == 1) |>
+            st_intersection(st_as_sf(plot_extent_utm)) |>  # clip to actual plot shape, not just bbox 
+            select(-c(WMD, Shp_Lng, Shap_Ar)) 
+          
+           plot_pixels <- st_transform(plot_pixels_utm, 4326)
+          
+         ###################
+          # 2 Get observed values to plot_pixels
+          # Get the dry areas from the complement of the wet areas
+          true_dry <- st_difference(st_geometry(st_as_sf(plot_extent)), st_union(true_wet)) |> 
+            st_sf() |>
+            rename(geometry=1) |>
+            filter(!st_geometry_type(geometry) %in% c("MULTILINESTRING", "LINESTRING")) |>
+            st_make_valid() 
+          
+           # Add dry attributes 
+           dry_values <- true_dry |> 
+             mutate(true_label = "dry",
+                    dataset = dataset_label) 
+           
+          # Add wet attributes (location, size, veg)
+          wet_values <- true_wet |> 
+            st_intersection(st_as_sf(plot_extent)) |> # crop true_wet to the in-buffered plot too
+            select(ID, dataset, area_ha, pond_id=rownum) |> 
+            mutate(true_label = "wet")
+                     
+          # combine 
+          observed <- bind_rows(dry_values, wet_values)
+          
+          # Add true label via spatial join
+          observed_values <- st_join(plot_pixels, observed) |>
+            distinct(geometry, .keep_all = TRUE)
+          
+         ###################
+         # 3. Get predicted values for this plot
+         #    (Don't reproject prediction rasters, it's best not to reproject  
+         #    rasters where we can help it, plus it takes forever)
+         probabilities     <- terra::extract(our_probability_rast, plot_pixels_utm, xy = FALSE) |> select(-ID)
+         postproc10_values <- extract_prediction(postproc10_rast, "postproc10",  plot_pixels_utm)
+         dw_values         <- extract_prediction(dw_rast,         "dw",          plot_pixels)
+         dswe_agg_values   <- extract_prediction(dswe_agg_rast,   "dswe_agg",    plot_pixels)
+         dswe_cons_values  <- extract_prediction(dswe_cons_rast,  "dswe_cons",   plot_pixels)
+
+         # combine estimates from different products
+         plot_results <- bind_cols(
+           observed_values,
+           probabilities,
+           postproc10_values, 
+           dw_values,
+           dswe_agg_values,
+           dswe_cons_values)
+         
+        # add jrc if it exists (aug16)
+        if (file.exists(jrc_path)) {
+          jrc_values <- extract_prediction(jrc_rast, "jrc", plot_pixels)
+          plot_results <- bind_cols(plot_results, jrc_values)
+        }
+         
+         ###################
+         # 4a. Calculate distance to pond centroids
+         true_wet_utm <- st_transform(true_wet, epsg)
+         
+         pond_centroids <- st_centroid(true_wet_utm) |> 
+            select(ID, centroid_geom=geometry) |> 
+            as.data.frame(xy=T)
+                          
+         # Add distance from point to pond centroid
+         plot_results <- plot_results |>
+            st_transform(epsg) |>
+            left_join(pond_centroids, by = "ID") |>
+            mutate(dist_to_centroid_m = if_else(
+                true_label == "wet",
+                as.numeric(st_distance(geometry, centroid_geom, by_element = TRUE)),
+                NA_real_
+            )) |>
+            select(-centroid_geom) |>
+            st_transform(4326)
+         
+         ###################
+         # 4b. Calculate distance to pond edges
+          true_dry_utm  <- st_transform(true_dry, epsg)
+          template_rast <- crop(wetlandFootprint, plot_extent_utm)
+          
+          wet_rast <- terra::rasterize(vect(true_wet_utm), template_rast, field = 1)
+          dry_rast <- terra::rasterize(vect(true_dry_utm), template_rast, field = 1)
+          
+          dry_dist_wgs <- project(terra::distance(wet_rast), "EPSG:4326")
+          wet_dist_wgs <- project(terra::distance(dry_rast), "EPSG:4326")
+          
+          plot_results <- plot_results |>
+            st_transform(epsg) |>
+            mutate(dist_to_edge_m = if_else(
+              true_label == "wet",
+              terra::extract(wet_dist_wgs, plot_pixels)[, 2],
+              terra::extract(dry_dist_wgs, plot_pixels)[, 2]
+            )) |>
+            st_transform(4326)
+          
+         ###################
+         # 5. NDVI
+         ndvi_file <- ndvi_files[str_detect(ndvi_files, paste0("_", plot_id, "\\.tif$"))]
+          
+         if (length(ndvi_file) == 0) {
+           message(paste("Skipping plot", plot_id, "- NDVI file not found."))
+           next
+         }
+          
+         plot_results <- bind_cols(
+           plot_results,
+           terra::extract(rast(ndvi_file), plot_pixels, xy = FALSE) |> select(-ID)
+           )
+         
+         ###################
+         # Store result
+         results_list[[i]] <- plot_results |>
+           mutate(x = st_coordinates(geometry)[, 1],
+                  y = st_coordinates(geometry)[, 2]) 
+    }
+  } # end of plot-level stuff
+  
+  #############################################
+   # Combine all results into one data frame
+  point_probabilities <- do.call(rbind, results_list) |>
+    mutate(STATE = if_else(dataset %in% c("brood16", "pair16", "brood17", "pair17"), "ND", STATE)) |>
+    filter(!is.na(STATE)) |>
+    left_join(test_box_lookup)
+
+  # 6. Add PHDI via spatial join
+  processed_phdi_list <- lapply(processed_phdi_list, function(layer) {
+    st_transform(layer, 4326) |> select(PHDI)
+  })
+
+  point_probabilities <- point_probabilities |>
+    st_join(processed_phdi_list[[phdi_yr]], left = FALSE) |>
+    st_drop_geometry()
+
+  return(point_probabilities)
+}
+```
+
+# Run function
+This creates a dataset for every non-clouded pixel with the historic wetland footprint, with our model's estimated probabilities and classifications from other models (water, nonwater, or NA for clouded/noData)
+```{r}
+# Get OOST set
+point_probabilities_May22 <- run_plot_extraction(mmyy="May22")
+point_probabilities_May24 <- run_plot_extraction(mmyy="May24")
+point_probabilities_Aug16 <- run_plot_extraction(mmyy="Aug16")
+
+point_probabilities_oost <-
+  bind_rows(
+    point_probabilities_May22,
+    point_probabilities_May24,
+    point_probabilities_Aug16
+  )
+
+# this has 8 mil oost points in the end! 
+point_probabilities_oost |> 
+  write_csv(here(paste0("data/accuracy_assessment/pixel_results.csv")))
+```

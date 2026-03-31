@@ -1,0 +1,52 @@
+---
+title: "Fig 11: Histogram"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(scales)
+```
+
+```{r}
+## Read in predicted probabilities
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+
+# Set decision threshold
+dt = 0.87
+```
+
+
+```{r}
+p <- pixel_results |> 
+  mutate(true_label = if_else(true_label=="wet", "water", "non-water")) |> 
+  ggplot() + 
+  geom_histogram(aes(x=probabilities, fill=true_label), position="identity", alpha=0.8) + 
+  geom_vline(aes(xintercept=dt), linetype="dashed")  + 
+  scale_y_continuous(labels = label_comma()) + 
+  labs(x="Predicted Probability of Water", 
+       y="Count",
+       fill="True Label"
+      # title="Distribution of Predicted Probabilities for Test Pixels"
+      ) + 
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 16),   
+    axis.title = element_text(size = 16),   
+    plot.title = element_text(size = 18),
+    legend.text  = element_text(size = 16), 
+    legend.title = element_text(size = 16)   
+  ) 
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_11.png"),
+       plot = p,
+       width = 700/96, 
+       height = 450/96, 
+       units = "in",
+       dpi = 1000)
+```

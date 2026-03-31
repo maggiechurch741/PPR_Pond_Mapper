@@ -1,0 +1,89 @@
+---
+title: "Fig 3: PPR Climate Averages"
+author: "Maggie Church"
+date: "2026-03-11"
+---
+
+https://www.ncei.noaa.gov/access/monitoring/climate-at-a-glance/county/mapping/110/tavg/202112/12/mean 
+https://www.ncei.noaa.gov/access/monitoring/climate-at-a-glance/county/mapping/110/pcp/202112/12/mean
+```{r}
+# read in boundaries
+ppr <- st_read(here("data/boundaries/PPJV")) |> st_transform(4326)
+counties <- st_read(here("data/boundaries/counties")) |> st_transform(4326)
+states <- st_read(here("data/boundaries/states")) |> st_transform(4326)
+
+# read in NOAA data
+temp <- read_csv(here("data/noaa/temp_means.csv"), skip = 3)
+
+# Precip: data gets read in badly. First fix HTML entities, then read in
+lines <- readLines(here("data/noaa/precip_means_in.csv"))
+lines_fixed <- gsub("&#039,", "\u0027", lines)
+grep("\u0027", lines_fixed, value=TRUE) |> head()
+precip <- read_csv(I(lines_fixed), skip = 3) |> select(-last_col())
+```
+
+Limit noaa data to the ppr
+```{r}
+# ppr county list
+ppr_counties <- st_intersection(counties, ppr)
+
+# state fips - abbr xwalk
+state_xwalk <- states |> st_drop_geometry() |> select(STATEFP, STUSPS)
+
+# limit precip data to ppr 
+precip_ppr <- precip |> 
+  separate(ID, into = c("STUSPS", "COUNTYFP"), sep = "-") |>
+  left_join(state_xwalk, by="STUSPS") |>
+  mutate(county_name = str_remove(Name, " County"))  |> 
+  inner_join(ppr_counties, by=c("COUNTYFP", "STATEFP")) |>
+  st_as_sf() |>
+  mutate(precip_mm = `1901-2000 Mean`*25.4)
+
+temp_ppr <- temp |> 
+  separate(ID, into = c("STUSPS", "COUNTYFP"), sep = "-") |>
+  left_join(state_xwalk, by="STUSPS") |>
+  mutate(county_name = str_remove(Name, " County"))  |> 
+  inner_join(ppr_counties, by=c("COUNTYFP", "STATEFP")) |>
+  st_as_sf() |>
+  mutate(temp_c = (`1901-2000 Mean` - 32) * 5/9)
+```
+
+```{r}
+library(viridis)
+library(cowplot)
+
+# precip
+a <- ggplot(st_transform(precip_ppr, 32614)) + 
+  geom_sf(aes(fill=precip_mm)) + 
+  labs(title="Mean precipitation (mm)",
+       fill="") + 
+  scale_fill_viridis(option="plasma",
+                     direction = -1) +
+  theme_minimal()
+a
+
+# temp
+b <- ggplot(st_transform(temp_ppr, 32614)) + 
+  geom_sf(aes(fill=temp_c)) + 
+  labs(title=expression("Mean temperature ("*degree*C*")"),
+       fill="") + 
+  scale_fill_viridis_c(direction = -1) +
+  theme_minimal()
+
+p <- plot_grid(
+  ggdraw(a) + draw_plot_label("a", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold"),
+  ggdraw(b) + draw_plot_label("b", x = 0, y = 1, hjust = -0.5, vjust = 1, size = 18, fontface = "bold"),
+  ncol = 2
+)
+p
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_03.png"),
+       plot = p,
+       width = 1000/96, 
+       height = 300/96, 
+       units = "in",
+       dpi = 1000,
+       bg = "white")  
+```

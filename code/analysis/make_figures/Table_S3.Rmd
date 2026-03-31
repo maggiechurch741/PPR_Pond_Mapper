@@ -1,0 +1,54 @@
+---
+title: "Table S3: pixel accuracy where NDVI < 0"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+source(here("code/analysis/make_figures/helper_functions/create_grouped_stats_table.R"))
+source(here("code/analysis/make_figures/helper_functions/calculate_grouped_accuracy.R"))
+```
+
+Water is way less vegetated in Coteau, way more vegetated in Lake Agassiz (also just way less water sampled in Lake Agassiz and way more water in Coteau)
+```{r}
+pixel_results |>
+  filter(!is.na(NDVI)) |>  # huh, surprising amount of missing NDVI... 
+  group_by(ecoregion_name, true_label) |> 
+  summarize(n_bare = sum(NDVI < 0), 
+            n = n(), 
+            p_bare = round(n_bare/n*100),
+            mean_ndvi = round(mean(NDVI), 2),
+            median_ndvi = round(median(NDVI), 2)) |> 
+  arrange(desc(p_bare))
+```
+
+Get pixel metrics by ecoregion, where NDVI < 0
+```{r}
+metric_pixel_modelcomparison <- c("oa", "oe", "ce", "f1")
+metric_pixel_modelcomparison_labels <- c("OA", "OE", "CE", "F1")
+
+ts3 <- pixel_results |> 
+  filter(NDVI < 0) |> 
+  calculate_grouped_accuracy(group_cols = c("ecoregion_name"), 
+                             model = "postproc10") |>
+  arrange(ecoregion_name) |> 
+  create_grouped_stats_table(group_col = ecoregion_name, 
+                             model="postproc10",
+                             metrics = metric_pixel_modelcomparison,
+                             include_plot_accuracy = FALSE
+                             ) 
+
+ts3
+```
+
+```{r}
+write_csv(ts3, here("figures/R/Table_S3.csv"))
+```

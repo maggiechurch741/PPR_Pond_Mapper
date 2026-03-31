@@ -1,0 +1,366 @@
+---
+title: "Get estimated pond polygons"
+author: "Maggie Church"
+created: "2025-12-30"
+updated: "2026-03-25"
+---
+
+**Description**: Evaluates pond detection accuracy of five surface water classification 
+products (our post-processed model, Dynamic World, DSWE aggressive, DSWE conservative, 
+and JRC) against HAPET ground-truth pond observations across out-of-sample test plots. 
+For each plot-survey, crops prediction rasters and observed pond polygons to a standardized 
+1000 ha square plot boundary, then exports all observed, estimated, and cloud polygons 
+as a single shapefile for downstream analysis.
+
+**Inputs**:
+-  Plot boundary shapefile (created in script #1)
+-  HAPET pond boundaries for all ponds (including ones < 0.04 ha) with split polygons merged (script #2)
+-  Test plot-survey ids (we can stratify these later)
+-  Prediction rasters for each test year (exported from GEE): our post-processed classification raster, Dynamic World, DSWE, NDVI, and JRC
+
+**Steps**:
+1. Load test plot and pond data; filter to out-of-sample plot-surveys
+2. For each plot, compute the appropriate UTM zone and crop to a standardized 1000 ha square boundary
+3. For each product and year, crop prediction rasters to each test plot and extract water and cloud polygons (8-neighbor rule)
+4. Crop observed HAPET ponds to each test plot square
+5. Combine observed ponds, estimated water polygons, and cloud masks across all products and years
+
+**Notes**:
+- Plot 253 / dataset 2022 excluded — suspected incomplete HAPET delineation of river
+- All plots standardized to UTM Zone 14N (EPSG:32614) for area calculations
+- JRC only available for Aug 2016
+
+```{r}
+library(tidyverse)
+library(sf)
+library(terra)
+library(here)
+```
+
+```{r setup, include=FALSE}
+plots <- st_read(here("data/allPlots")) # keep in wgs84 for now
+
+# observed ponds
+ponds <- st_read(here("data", "allPonds_all")) 
+
+# set test plots and time periods
+test_plot_ids <- read_csv("data/train_test_data/test_plot_surveys.csv") |> 
+  rename(Plot = plot_id)
+
+# actually kill this plot-year. I think maybe HAPET didn't delineate the river, hard to prove
+test_plot_ids <- test_plot_ids |> filter(!(Plot==253 & dataset=="2022"))
+
+# postprocessed raster
+may2022_pp1 <- rast(here("data/gee_exports/predicted_rasters/processed/smooth10m/May2022.tif"))
+may2024_pp1 <- rast(here("data/gee_exports/predicted_rasters/processed/smooth10m/May2024.tif"))
+aug16_pp1 <- rast(here("data/gee_exports/predicted_rasters/processed/smooth10m/Aug2016.tif"))
+
+jrc_Aug16 <- rast(here("data/gee_exports/gee_rasters/jrc/processed/Aug2016.tif"))
+
+dw_Aug16 <- rast(here("data/gee_exports/gee_rasters/dynamicWorld/processed/Aug2016.tif"))
+dw_May22 <- rast(here("data/gee_exports/gee_rasters/dynamicWorld/processed/May2022.tif"))
+dw_May24 <- rast(here("data/gee_exports/gee_rasters/dynamicWorld/processed/May2024.tif"))
+
+dswe_agg_Aug16 <- rast(here("data/gee_exports/gee_rasters/dswe_aggressive/processed/Aug2016.tif"))
+dswe_agg_May22 <- rast(here("data/gee_exports/gee_rasters/dswe_aggressive/processed/May2022.tif"))
+dswe_agg_May24 <- rast(here("data/gee_exports/gee_rasters/dswe_aggressive/processed/May2024.tif"))
+
+dswe_cons_Aug16 <- rast(here("data/gee_exports/gee_rasters/dswe_conservative/processed/Aug2016.tif"))
+dswe_cons_May22 <- rast(here("data/gee_exports/gee_rasters/dswe_conservative/processed/May2022.tif"))
+dswe_cons_May24 <- rast(here("data/gee_exports/gee_rasters/dswe_conservative/processed/May2024.tif"))
+```
+
+## Get obs and predicted ponds for test set
+Limit to ponds and plots within OOST test set. Also calculate size classes while we're here.
+Eh I'm just gonna skip 2016. Makes evaluation of rolling means weird (bc we don't estimate 2015), and makes results weird to interpret
+```{r}
+# filter ponds to test plots
+test_ponds <- inner_join(ponds, test_plot_ids) |> st_transform(32614)
+
+# filter plots to test plots
+test_plots_sf <- inner_join(plots, test_plot_ids)
+```
+
+fn to make plot square 
+```{r}
+# Quick function to get the appropriate utm zone for each plot (rn they're in wgs84),
+# based on plot centroid. Add the epsg code to a new column
+get_utm_epsg <- function(sf_obj) {
+  plot_centroid <- st_coordinates(st_centroid(sf_obj))
+  lon <- plot_centroid[1]
+  lat <- plot_centroid[2]
+  zone <- floor((lon + 180) / 6) + 1
+  epsg <- ifelse(lat >= 0, 32600 + zone, 32700 + zone)
+  return(epsg)
+}
+
+# apply fn
+test_plots_sf <- test_plots_sf |>
+  mutate(
+    utm_epsg = sapply(seq_len(n()), function(i) get_utm_epsg(test_plots_sf[i, ]))
+  )
+```
+
+fn to make each plot a 1000 ha square, to deal with some weird edge effects 
+```{r}
+make_square <- function(obj_wgs, area, epsg) {
+  
+  # Put into projected crs for buffering - find the best UTM zone
+  plot_sf_utm <- st_transform(obj_wgs, epsg)
+  
+  # Get bbox height and width 
+  bbox <- st_bbox(plot_sf_utm)
+  width  <- bbox["xmax"] - bbox["xmin"]
+  height <- bbox["ymax"] - bbox["ymin"]
+  
+  # Make the bbox square, use the length of whichever side is shorter
+  if (width > height) {
+    diff = width - height
+    bbox["xmax"] <- bbox["xmax"] - diff
+  } else if (height > width) {
+    diff = height - width
+    bbox["ymax"] <- bbox["ymax"] - diff
+  }
+  
+  # Crop the plot sf by the square bbox
+  square_poly <- st_as_sfc(bbox, crs = st_crs(plot_sf_utm))
+  plot_square <- st_intersection(plot_sf_utm, square_poly)
+  
+  # Now make this square plot 1000 ha
+  # The plots aren't axis-aligned (pointing north), so I can't assume area=l*w
+  # I have to iteratively find the buffer that makes the square 1000 ha
+  f <- function(d) {abs(as.numeric(st_area(st_buffer(plot_square, dist=-d))) - area)}
+  opt_d <- optimize(f, interval=seq(0, 50, 0.5))$minimum
+  plot_sf_utm_buff <- st_buffer(plot_square, dist=-opt_d)
+  
+  # Convert to UTM14, so that I don't have to re-project any estimated rasters 
+  # to UTM15 (which may change its landscapemetrics). Bc I'm most interested in
+  # pond counts, this should be fine. 
+  plot_sf_wgs_buff <- st_transform(plot_sf_utm_buff, 32614)
+  
+  return(plot_sf_wgs_buff)
+}
+
+# apply fn
+test_plots_sf_square <- do.call(
+  rbind, 
+  lapply(seq_len(nrow(test_plots_sf)), function(i) {
+    make_square( 
+      obj_wgs = test_plots_sf[i, ], 
+      area = 1000 * 1e4, 
+      epsg = test_plots_sf$utm_epsg[i] 
+      ) 
+    }) 
+  )
+```
+
+fn to calculate pond metrics for a plot-survey (eg #ponds) and also return obs and est polygons
+```{r}
+# Function to crop raster tiles by plots
+get_pond_metrics <- function(plot_idx, raster, dataset_sel, cloudval, waterval) {
+  
+  plot_square <- test_plots_sf_square[plot_idx, ]
+ 
+  ################################################
+  # Crop estimated raster to current square plot
+
+  # if raster is in wgs84, then reproject the plot ext before cropping
+  # our model and the plot ext are both in utm14 otherwise
+  if(crs(raster, describe = TRUE)$code == 4326){
+     plot_square_rastcut <- plot_square |> st_transform(4326)
+  } else {
+    plot_square_rastcut <- plot_square
+  }
+  
+  ponds_est <- crop(raster, vect(plot_square_rastcut))
+  
+  # binary water/nonwater raster
+  ponds_est_bin <- ponds_est
+  ponds_est_bin[ponds_est_bin != waterval] <- NA
+  
+  # cloud raster
+  clouds <- ponds_est
+  clouds[clouds != cloudval] <- NA
+  
+  # I could convert to vector, or use landscapemetrics. I don't think it matters, 
+  # and I'd rather be able to sanity check with vectors
+  ponds_est_sf <- terra::as.polygons(
+    ponds_est_bin,
+    dissolve = TRUE,   
+    directions = 8      # 8-neighbor rule
+  ) |> 
+    st_as_sf() |> 
+    st_cast("POLYGON") |>
+    st_intersection(plot_square_rastcut) |> #crop to square plot
+    mutate(pond_size = as.numeric(st_area(geometry)))
+  
+  ################################################
+  # add clouds
+  clouds_sf <- clouds |>
+    terra::as.polygons(dissolve = TRUE) |>
+    sf::st_as_sf() |>            # convert from spatvector to sf
+    st_intersection(plot_square_rastcut)  #crop to square plot
+
+  ################################################
+  # Crop observed ponds to the current square plot
+  ponds_obs <- test_ponds |> 
+    filter(dataset==dataset_sel) |> 
+    st_intersection(st_geometry(plot_square)) |>
+    mutate(pond_size = as.numeric(st_area(geometry))) |>   # add pond size
+    mutate(rownum = row_number()) 
+
+  ################################################
+  # return metrics + obs/est datasets
+  list(
+    plot_id            = plot_square$Plot,
+    ponds_obs_sf       = ponds_obs,
+    ponds_est_sf       = ponds_est_sf,
+    clouds_sf          = clouds_sf
+    )
+}
+```
+
+Fn to apply the above to different rasters/years
+```{r}
+get_test_results <- function(raster_list, dataset_map, waterval, cloudval) {
+
+  # run for each dataset
+  results <- lapply(names(raster_list), function(ds) {
+  
+    res_list <- lapply(
+        which(test_plots_sf_square$Plot %in% test_plot_ids$Plot[test_plot_ids$dataset == ds] &
+        test_plots_sf_square$dataset == ds),
+      get_pond_metrics,
+      raster      = raster_list[[ds]],
+      dataset_sel = ds,
+      waterval    = waterval,
+      cloudval    = cloudval
+    )
+  
+    list(
+      dataset = ds,
+      year    = dataset_map[[ds]],
+      results = res_list
+    )
+  })
+
+  # from results above, combine observed ponds sf
+  ponds_obs_sf <- bind_rows(lapply(results, function(r) {
+    do.call(bind_rows, lapply(r$results, function(x) {
+      if (!is.null(x) && nrow(x$ponds_obs_sf) > 0) {
+        cbind(
+          plot_id = x$plot_id,
+          year    = r$year,
+          x$ponds_obs_sf
+        )
+      }
+    }))
+  })) |> mutate(type = "observed")
+
+  # from results above, combine estimated ponds sf
+  ponds_est_sf <- bind_rows(lapply(results, function(r) {
+    do.call(bind_rows, lapply(r$results, function(x) {
+      if (!is.null(x) && nrow(x$ponds_est_sf) > 0) {
+        cbind(
+          plot_id = x$plot_id,
+          year    = r$year,
+          x$ponds_est_sf
+        )
+      }
+    }))
+  })) |> mutate(type = "estimated")
+  
+  # from results above, combine clouds sf
+  clouds_sf <- do.call(rbind, lapply(results, function(r) {
+    do.call(rbind, lapply(r$results, function(x) {
+      if (!is.null(x$clouds_sf) && nrow(x$clouds_sf) > 0) {
+        x$clouds_sf$plot_id <- x$plot_id
+        x$clouds_sf$year    <- r$year
+        x$clouds_sf
+      }
+    }))
+  }))
+  
+  # return clean object
+  list(
+    ponds_obs_sf = ponds_obs_sf,
+    ponds_est_sf = ponds_est_sf,
+    clouds_sf  = clouds_sf
+  )
+}
+```
+
+Apply functions
+```{r}
+model_pp1 <- get_test_results(
+  raster_list = list("2022" = may2022_pp1, "2024" = may2024_pp1, "brood16" = aug16_pp1),
+  dataset_map = c("2022" = "2022", "2024" = "2024", "brood16" = "brood16"),
+  cloudval = 3,
+  waterval = 1) 
+
+dswe_agg <- get_test_results(
+  raster_list = list("2022" = dswe_agg_May22, "2024" = dswe_agg_May24, "brood16" = dswe_agg_Aug16),
+  dataset_map = c("2022" = "2022", "2024" = "2024", "brood16" = "brood16"),
+  cloudval = 2,
+  waterval = 1)
+
+dswe_cons <- get_test_results(
+  raster_list = list("2022" = dswe_cons_May22, "2024" = dswe_cons_May24, "brood16" = dswe_cons_Aug16),
+  dataset_map = c("2022" = "2022", "2024" = "2024", "brood16" = "brood16"),
+  cloudval = 2,
+  waterval = 1)
+
+dw <- get_test_results(
+  raster_list = list("2022" = dw_May22, "2024" = dw_May24, "brood16" = dw_Aug16),
+  dataset_map = c("2022" = "2022", "2024" = "2024", "brood16" = "brood16"),
+  cloudval = 2,
+  waterval = 1)
+
+jrc <- get_test_results(
+  raster_list = list("brood16" = jrc_Aug16),
+  dataset_map = c("brood16" = "brood16"),
+  cloudval = 0,
+  waterval = 2)
+```
+
+Combine and export all polygons: observed and each model's estimations of water (plus clouds)
+```{r}
+# observed ponds
+ponds_obs_sf <- model_pp1$ponds_obs_sf |> st_transform(4326)
+
+# our model's estimated ponds and clouds
+ponds_est_sf <- model_pp1$ponds_est_sf |> mutate(type="estimated_ours") |> st_transform(4326)
+clouds_est <- model_pp1$clouds_sf  |> mutate(type="clouds_ours") |> st_transform(4326)
+
+# dswe-conservative's estimated ponds and clouds
+ponds_est_sf_cons <- dswe_cons$ponds_est_sf |> mutate(type="estimated_cons")
+clouds_sf_cons <- dswe_cons$clouds_sf  |> mutate(type="clouds_cons")
+
+# dswe-aggressive's estimated ponds and clouds
+ponds_est_sf_agg <- dswe_agg$ponds_est_sf |> mutate(type="estimated_agg")
+clouds_sf_agg <- dswe_agg$clouds_sf  |> mutate(type="clouds_agg")
+
+# dynamic world's estimated ponds and clouds
+ponds_est_sf_dw <- dw$ponds_est_sf |> mutate(type="estimated_dw")
+clouds_sf_dw <- dw$clouds_sf |> mutate(type="clouds_dw")
+
+# jrc's estimated ponds and clouds
+ponds_est_sf_jrc<- jrc$ponds_est_sf |> mutate(type="estimated_jrc")
+#clouds_sf_jrc <- jrc$clouds_sf |> mutate(type="clouds_jrc") # no clouds
+
+all_sf <- bind_rows(
+  ponds_obs_sf,
+  ponds_est_sf,
+  ponds_est_sf_cons,
+  ponds_est_sf_agg,
+  ponds_est_sf_dw,
+  ponds_est_sf_jrc,
+  clouds_est,
+  clouds_sf_cons,
+  clouds_sf_agg,
+  clouds_sf_dw
+) |> 
+  select(-c(plot_id, year, Shp_Lng, Shap_Ar, utm_epsg, remapped, water))
+
+st_write(all_sf, here("data/accuracy_assessment/all_est_obs_clouds/all_est_obs_clouds.shp"), append=F)
+```

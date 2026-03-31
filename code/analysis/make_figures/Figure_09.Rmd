@@ -1,0 +1,171 @@
+---
+title: "Fig 9: SHAP"
+author: "Maggie Church"
+created: "2025-12-20"
+updated: "2026-03-09"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(cowplot)
+library(ranger)
+library(fastshap)
+library(shapviz)
+library(future)
+library(parallelly)
+```
+
+This took 45min
+Shapley values offer a way of measuring relative contribution of each feature to the model output, for a single obs. 
+```{r}
+# set.seed(123)
+# 
+# # read in training data & set features and hyperparameters
+# train_df <- read_csv(here("data", "train_test_data", "balanced_training", "training_bal.csv"))
+# feats = c("swir1", "NDRE", "TCG", "WTI", "IFW", "VH", "BU3", "TVI") 
+# hyperparams = list(num.trees = 205, mtry = 3, sample.fraction = 0.2653, min.node.size = NULL)
+# 
+# train_df <- train_df |> 
+#   select(c(type, all_of(feats))) |>
+#   mutate(type = as.factor(type))
+# 
+# # get model
+# rf <- do.call(ranger, c(
+#   list(
+#     formula = as.formula("type ~ ."),
+#     data = train_df,
+#     importance = "impurity",
+#     probability = TRUE
+#   ),
+#   hyperparams
+# ))
+# 
+# w <- parallelly::availableCores()
+# future::plan("multisession", workers=w-4) # 30s
+# 
+# # just predictor vars
+# X <- subset(train_df, select = -type)  # features only
+# 
+# # prediction wrapper
+# pfun <- function(object, newdata) { 
+#   unname(predict(object, data = newdata)$predictions[, "wet"])
+# }
+# 
+# # calculate SHAP values for each obs
+# system.time({  # estimate run time
+#   ex.t1 <- explain(rf, X = X, pred_wrapper = pfun, 
+#                    nsim = 100, # 100 MC simulations to get feature contributions
+#                    adjust = TRUE,    
+#                    shap_only = FALSE) 
+# })
+# 
+# saveRDS(ex.t1, file = here("data/accuracy_assessment/shap.rds"))
+
+ex.t2 <- readRDS(file = here("data/accuracy_assessment/shap.rds"))
+```
+
+```{r}
+################################################
+# Shapley-based feature importance scores: mean of abs value of feature contribution 
+shv.global <- shapviz(ex.t1)
+colnames(shv.global$X) <- toupper(colnames(shv.global$X))
+colnames(shv.global$S) <- toupper(colnames(shv.global$S))
+
+# Plot
+a <- sv_importance(shv.global, 
+              kind="bar") + 
+  labs(x="Mean Absolute SHAP Value") + 
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 16),  # feature labels (y-axis)
+    axis.title = element_text(size = 16)    # axis titles
+  ) 
+```
+
+```{r}
+# shap of S2 vars
+s2_col_idx <- which(colnames(ex.t1$feature_values) != "VH")
+
+ex_s2 <- list(
+  shapley_values = as.matrix(ex.t1$shapley_values[, s2_col_idx, drop = FALSE]),
+  feature_values = as.data.frame(ex.t1$feature_values[, s2_col_idx, drop = FALSE]),
+  baseline = ex.t1$baseline
+)
+
+# shap of VH vars
+vh_col_idx <- which(colnames(ex.t1$feature_values) == "VH")
+vh_row_idx <- ex.t1$feature_values$VH != -9999
+
+ex_vh <- list(
+  shapley_values = as.matrix(ex.t1$shapley_values[vh_row_idx, vh_col_idx, drop = FALSE]),
+  feature_values = as.data.frame(ex.t1$feature_values[vh_row_idx, vh_col_idx, drop = FALSE]),
+  baseline = ex.t1$baseline
+)
+
+# Combine VH and S2 shap values
+sv_to_long <- function(ex) {
+  phi_mat <- as.matrix(ex$shapley_values)
+  fv_df   <- as.data.frame(ex$feature_values)
+  
+  data.frame(
+    feature = rep(colnames(phi_mat), each = nrow(phi_mat)),
+    phi     = as.vector(phi_mat),
+    value   = as.vector(as.matrix(fv_df))
+  )
+}
+
+df_s2 <- sv_to_long(ex_s2) |> mutate(group = "Other Features")
+df_vh <- sv_to_long(ex_vh) |> mutate(group = "VH")
+df_all <- bind_rows(df_s2, df_vh) |> mutate(feature = if_else(feature=="swir1", "SWIR1", feature))
+
+feature_order <- c("VH", "TVI", "BU3", "WTI", "IFW", "TCG", "SWIR1", "NDRE") 
+
+df_all_scaled <- df_all |>
+  group_by(feature) |>
+  mutate(value_scaled = scales::rescale(value)) |>
+  ungroup() |>
+  mutate(feature = factor(feature, levels = feature_order))
+
+b <- ggplot(df_all_scaled) +
+  geom_vline(xintercept = 0, color = "grey70") + 
+  ggbeeswarm::geom_quasirandom(aes(x = phi, y = feature, color = value_scaled),
+                               alpha = 0.6, size = 1) +
+  scale_color_gradient(low = "blue", high = "red",
+                       breaks = c(0, 1),
+                       labels = c("Low", "High")) +
+  theme_minimal() +
+  labs(
+    x = "SHAP value",
+    y = "Feature",
+    color = "Feature value"
+  ) +
+  theme(
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16)   
+  ) 
+```
+
+Draw a and b panels
+Export 1200 x 600
+```{r}
+p <- plot_grid(a, b, 
+          ncol = 2, 
+          rel_widths = c(450, 650),  
+          labels = c("a", "b"),
+          label_size = 18,
+          label_fontface = "bold",
+          label_x = c(0.05, 0.05),
+          label_y = c(1, 1))
+p
+```
+
+```{r}
+ggsave(filename = here("figures/manuscript/Figure_09.png"),
+       plot = p,
+       width = 1200/96, 
+       height = 600/96, 
+       units = "in",
+       dpi = 1000)
+```

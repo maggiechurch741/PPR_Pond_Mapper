@@ -1,0 +1,312 @@
+---
+title: "Figures S1-S4: Model Comparisons by [x] - dotplots"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(here)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+source(here("code/analysis/make_figures/helper_functions/create_grouped_stats_table.R"))
+source(here("code/analysis/make_figures/helper_functions/calculate_grouped_accuracy.R"))
+```
+
+```{r}
+metric_pixel_modelcomparison <- c("oa", "oe", "ce", "f1")
+metric_pixel_modelcomparison_labels <- c("OA", "OE", "CE", "F1")
+
+models <- c("postproc10",  "dswe_cons", "dswe_agg", "dw", "jrc")
+
+model_labels <- c(
+    postproc10  = "Model",
+    dswe_agg   = "DSWE (Agg)",
+    dswe_cons  = "DSWE (Cons)",
+    dw         = "DW",
+    jrc        = "JRC"
+)
+
+# Define colors: red for your model, grey for others
+model_colors <- c(
+  "postproc10" = "red",
+  "dswe_agg"   = "grey50",
+  "dswe_cons"  = "grey50",
+  "dw"         = "grey50",
+  "jrc"        = "grey50"
+)
+
+# Define shapes
+model_shapes <- c(
+  "postproc10" = 16,
+  "dswe_agg"   = 17,
+  "dswe_cons"  = 15,
+  "dw"         = 18,
+  "jrc"        = 19
+)
+```
+
+### Fig S1: Accuracy by region 
+```{r}
+ecoregion_order <- c(6, 3, 4, 5, 2, 1)
+
+combined_results <- purrr::map_dfr(models, function(m) {
+    pixel_results |>
+    mutate(ecoregion_name = factor(ecoregion_name, 
+                               levels = ecoregion_name[match(ecoregion_order, test_box)])) |> 
+    calculate_grouped_accuracy(
+      group_cols = c("ecoregion_name"), 
+      model = m
+    ) |>
+    create_grouped_stats_table(
+      group_col = "ecoregion_name", 
+      model = m, 
+      metrics = metric_pixel_modelcomparison,
+      include_plot_accuracy = FALSE
+    ) |>
+    mutate(model = m)
+})
+
+ecoregion_labels <- c(
+  "Northwestern Glaciated Plains (MT)"     = "Northwestern Glaciated Plains (MT)" ,
+  "Northwestern Glaciated Plains (ND/SD)"  = "Northwestern Glaciated Plains (Dakotas)",
+  "Lake Agassiz Plain (N. MN)"             = "Lake Agassiz Plain",
+  "North Central Hardwood Forests (C. MN)" = "North Central Hardwood Forests",
+  "Northern Glaciated Plains (ND + SD)"    = "Northern Glaciated Plains" ,
+  "Western Corn Belt Plains (S. MN + IA)"  = "Western Corn Belt Plains"
+)
+
+df_long <- combined_results |>
+  filter(model != "jrc") |>
+  pivot_longer(cols = c(oa, oe, ce, f1),
+               names_to = "metric",
+               values_to = "value") |>
+  mutate(
+    metric = factor(metric, levels = c("oe", "ce", "f1", "oa")),
+    model  = factor(model, levels = models),
+    ourmodel = if_else(model=="postproc10", 1, 0)
+  )
+
+# Ensure factor levels match your models
+df_long$model <- factor(df_long$model, levels = names(model_labels))
+
+# 900 x 800
+p_s1 <- 
+  ggplot(df_long, aes(x = ecoregion_name, y = value, color = model, shape = model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  facet_wrap(~ metric, ncol = 1) +
+  scale_color_manual(values = model_colors, labels = model_labels) +
+  scale_shape_manual(values = model_shapes, labels = model_labels) +
+  scale_x_discrete(labels = ecoregion_labels) +
+  labs(x = "Ecoregion", y = "Value", color = "Model", shape = "Model") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title  = element_text(size = 16),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    legend.text  = element_text(size = 13),
+    strip.text   = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r}
+ggsave(filename = here("figures/Figure_S1.png"),
+       plot = p_s1,
+       width = 900/96, 
+       height = 800/96, 
+       units = "in",
+       dpi = 1000)
+```
+
+### Fig S2: Accuracy by time 
+```{r}
+combined_results <- purrr::map_dfr(models, function(m) {
+  pixel_results |>
+    calculate_grouped_accuracy(
+      group_cols = c("dataset"), 
+      model = m
+    ) |>
+    create_grouped_stats_table(
+      group_col = "dataset", 
+      model = m, 
+      metrics = metric_pixel_modelcomparison,
+      include_plot_accuracy = FALSE
+    ) |>
+    mutate(model = m)
+}) |> 
+  mutate(Survey = case_when(
+    Survey == "brood16" ~ "Aug 2016",
+    Survey == "2022" ~ "May 2022",
+    Survey == "2024" ~ "May 2024"
+  ))
+
+df_long <- combined_results |>
+    pivot_longer(cols = c(oa, oe, ce, f1),
+                 names_to = "metric",
+                 values_to = "value") |> 
+   mutate(metric = factor(metric, levels=c("oe", "ce", "f1", "oa")),
+   model  = factor(model, levels = models)) |> 
+   arrange(metric)
+
+# 900 x 800
+p_s2 <- ggplot(df_long, aes(x = Survey, y = value, color = model, shape = model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  facet_wrap(~ metric, ncol = 1) +
+  scale_color_manual(values = model_colors, labels = model_labels) +
+  scale_shape_manual(values = model_shapes, labels = model_labels) +
+  labs(x = "Survey", y = "Value", color = "Model", shape = "Model") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title  = element_text(size = 16),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    legend.text  = element_text(size = 13),
+    strip.text   = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r}
+ggsave(filename = here("figures/Figure_S2.png"),
+       plot = p_s2,
+       width = 900/96, 
+       height = 800/96, 
+       units = "in",
+       dpi = 1000)
+```
+
+### Fig S3: Accuracy by NDVI 
+```{r}
+ndvi_levels <- c(
+  "[-1.0, 0.0)", "[0.0, 0.4)", "[0.4, 1.0]"
+)
+
+pixel_results_wndvi <- pixel_results |> 
+  mutate(NDVI_class = case_when(
+    NDVI <= 0  ~ "[-1.0, 0.0)",
+    NDVI < 0.4 & NDVI >= 0 ~ "[0.0, 0.4)",
+    NDVI < 1 & NDVI >= 0.4 ~ "[0.4, 1.0]"
+    )) |> 
+  filter(!is.na(NDVI_class)) |> 
+  mutate(NDVI_class = factor(NDVI_class, levels = ndvi_levels))
+
+combined_results <- purrr::map_dfr(models, function(m) {
+  pixel_results_wndvi |>
+    calculate_grouped_accuracy(
+      group_cols = c("NDVI_class"), 
+      model = m
+    ) |>
+    create_grouped_stats_table(
+      group_col = "NDVI_class", 
+      model = m, 
+      metrics = metric_pixel_modelcomparison,
+      include_plot_accuracy = FALSE
+    ) |>
+    mutate(model = m)
+})
+
+df_long <- combined_results |>
+    pivot_longer(cols = c(oa, oe, ce, f1),
+                 names_to = "metric",
+                 values_to = "value") |> 
+   mutate(metric = factor(metric, levels=c("oe", "ce", "f1", "oa")),
+    model  = factor(model, levels = models)) |> 
+   arrange(metric)
+
+# 900 x 800
+p_s3 <- ggplot(df_long, aes(x = NDVI_class, y = value, color = model, shape = model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  facet_wrap(~ metric, ncol = 1) +
+  scale_color_manual(values = model_colors, labels = model_labels) +
+  scale_shape_manual(values = model_shapes, labels = model_labels) +
+  labs(x = "NDVI", y = "Value", color = "Model", shape = "Model") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title  = element_text(size = 16),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    legend.text  = element_text(size = 13),
+    strip.text   = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r}
+ggsave(filename = here("figures/Figure_S3.png"),
+       plot = p_s3,
+       width = 900/96, 
+       height = 800/96, 
+       units = "in",
+       dpi = 1000)
+```
+
+### Fig S4: Accuracy by phdi class
+```{r}
+edge_levels <- c(
+  "0-10m", "10-20m", "20-100m", "100-4000m"
+)
+
+pixel_results_wedge <- pixel_results |> 
+  mutate(edge_class = case_when(
+    dist_to_edge_m < 10  ~ "0-10m",
+    dist_to_edge_m < 20 & dist_to_edge_m >= 10 ~ "10-20m",
+    dist_to_edge_m < 100 & dist_to_edge_m >= 20 ~ "20-100m",
+    dist_to_edge_m < 4000 & dist_to_edge_m >= 100 ~ "100-4000m"
+    )) |> 
+  mutate(edge_class = factor(edge_class, levels = edge_levels))
+
+combined_results <- purrr::map_dfr(models, function(m) {
+  pixel_results_wedge |>
+    calculate_grouped_accuracy(
+      group_cols = c("edge_class"), 
+      model = m
+    ) |>
+    create_grouped_stats_table(
+      group_col = "edge_class", 
+      model = m, 
+      metrics = metric_pixel_modelcomparison,
+      include_plot_accuracy = FALSE
+    ) |>
+    mutate(model = m)
+})
+
+df_long <- combined_results |>
+    pivot_longer(cols = c(oa, oe, ce, f1),
+                 names_to = "metric",
+                 values_to = "value") |> 
+   mutate(metric = factor(metric, levels=c("oe", "ce", "f1", "oa")),
+   model  = factor(model, levels = models)) |> 
+   arrange(metric) |> 
+   filter(edge_class %in% c("0-10m", "10-20m", "20-100m")) |>
+   mutate(edge_class = str_remove(edge_class, "m"))
+
+# 900 x 800
+p_s4 <- ggplot(df_long, aes(x = edge_class, y = value, color = model, shape = model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  facet_wrap(~ metric, ncol = 1) +
+  scale_color_manual(values = model_colors, labels = model_labels) +
+  scale_shape_manual(values = model_shapes, labels = model_labels) +
+  labs(x = "Distance to Edge (m)", y = "Value", color = "Model", shape = "Model") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title  = element_text(size = 16),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    legend.text  = element_text(size = 13),
+    strip.text   = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_S4.png"),
+       plot = p_s4,
+       width = 900/96, 
+       height = 800/96, 
+       units = "in",
+       dpi = 1000)
+```

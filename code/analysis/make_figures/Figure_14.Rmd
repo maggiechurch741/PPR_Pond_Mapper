@@ -1,0 +1,113 @@
+---
+title: 'Fig 14: comparison pred vs obs'
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(sf)
+library(here)
+```
+
+```{r}
+# Read in plot-level test results
+plot_results <- read_csv(here(paste0("data/accuracy_assessment/plot_results.csv")))
+
+# For plot-level analysis, I stratify: 6 plots per ecoregion-survey. These are plots with HAPET data that I trust
+test_plots_stratified <- read_csv(here("data/train_test_data/test_plot_surveys_stratified.csv"))
+```
+
+```{r}
+plot_results <- inner_join(plot_results, test_plots_stratified)
+```
+
+Function to graph observed vs predicted surface water extent for each model
+```{r}
+plot_level_comparison <- function(df) {
+  
+  # Set plot title based on source
+  df <- df |> 
+    mutate(source_name = case_when(
+    source == "model"  ~ "Our Model",
+    source == "postproc" ~ "Post Processed Model",
+    source == "jrc"        ~ "GSW",
+    source == "dw"         ~ "Dynamic World",
+    source == "dswe_agg"  ~ "DSWE - Aggressive",
+    source == "dswe_cons" ~ "DSWE - Conservative",
+    TRUE ~ source
+  ))
+  
+  df_stats <- df |>
+    group_by(source_name) |>
+    summarize(
+      R = cor(pred_area_ha, true_wet_area_cloudless_ha, use = "complete.obs"),
+      slope = coef(lm(true_wet_area_cloudless_ha ~ pred_area_ha))[2],
+      intercept = coef(lm(true_wet_area_cloudless_ha ~ pred_area_ha))[1],
+      .groups = "drop"
+    )
+  
+  # Plot
+  p <- df |>
+    left_join(df_stats, by = "source_name") |>
+    ggplot(aes(x = pred_area_ha, y = true_wet_area_cloudless_ha)) +
+    geom_point(alpha = 0.5) +
+    geom_abline(aes(intercept = intercept, slope = slope), color = "blue") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    facet_wrap(~source_name, ncol = 2) +
+    labs(
+      x = "Estimated Surface Water Extent (ha)",
+      y = "Digitized Surface Water Extent (ha)"
+    ) +
+    geom_text(
+      data = df_stats,
+      aes(
+        x = 950, 
+        y = 100,
+        label = paste0("r = ", round(R, 2),
+                       "\ny = ", round(intercept, 2), " + ", round(slope, 2), "x")
+      ),
+      hjust = 0.8, vjust = -0.1, size = 4,
+      inherit.aes = FALSE) + 
+    xlim(0, 1000) +
+    ylim(0, 1000) +
+    theme_bw() +
+    theme(
+      axis.text = element_text(size = 15),
+      axis.title = element_text(size = 18),
+      strip.text = element_text(size = 18)
+    )
+
+  return(p)
+}
+```
+
+```{r}
+plot_water_results <- plot_results |>
+  filter(class=="water") |> 
+  mutate(true_wet_area_cloudless_ha = true_wet_area_m2_cloudless * 0.0001,
+         pred_area_ha = pred_area_m2 * 0.0001) |> 
+  filter(!source %in% c("model", "postproc20")) |> 
+  mutate(source = if_else(source == "postproc10", "model", source))
+
+p <- plot_level_comparison(plot_water_results) 
+p
+
+# Add a tiny right margin
+p <- plot_level_comparison(plot_water_results) +
+  theme(plot.margin = margin(t = 5, r = 15, b = 5, l = 5)) 
+
+```
+
+
+```{r}
+ggsave(filename = here("figures/R/Figure_14.png"),
+       plot = p,
+       width = 825/96, 
+       height = 780/96, 
+       units = "in",
+       dpi = 1000,
+       bg = "white")  
+```

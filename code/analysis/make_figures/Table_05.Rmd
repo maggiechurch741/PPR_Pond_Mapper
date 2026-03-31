@@ -1,0 +1,104 @@
+---
+title: "Table 5"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(here)
+library(yardstick)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+source(here("code/analysis/make_figures/helper_functions/create_grouped_stats_table.R"))
+source(here("code/analysis/make_figures/helper_functions/calculate_grouped_accuracy.R"))
+
+test_plots_stratified <- read_csv(here("data/train_test_data/test_plot_surveys_stratified.csv"))
+
+# For plot-level analysis, I stratify: 6 plots per ecoregion-survey. These are plots with HAPET data that I trust
+plot_results <- read_csv(here("data/accuracy_assessment/plot_results.csv")) |>
+    inner_join(test_plots_stratified)
+```
+
+# Table 5
+```{r}
+plot_water_results <- plot_results |>
+  filter(class=="water") |> 
+  mutate(true_wet_area_cloudless_ha = true_wet_area_m2_cloudless * 0.0001,
+         pred_area_ha = pred_area_m2 * 0.0001)
+
+plot_metrics <- plot_water_results |> 
+  group_by(source) |> 
+  summarize(
+    rmse = rmse(
+      tibble(truth = true_wet_area_cloudless_ha, estimate = pred_area_ha),
+      truth = truth,
+      estimate = estimate
+    )$.estimate |> round(0),
+    mean_error = round(mean(pred_area_ha - true_wet_area_cloudless_ha, na.rm = TRUE), 0),
+    n_plots = n_distinct(Plot, dataset),
+  )
+plot_metrics
+```
+
+Pixel results
+```{r}
+refac <- pixel_results |>
+  mutate(
+    true_label = factor(true_label),
+    across(c(postproc10, dswe_agg, dswe_cons, dw, jrc),
+           ~ factor(case_when(.x == "water" ~ "wet",
+                              .x == "nonwater" ~ "dry",
+                              T ~ .x)))
+  )
+
+get_cm <- function(pred, ref, positive = "wet") {
+  pred <- factor(pred, levels = c("wet", "dry"))
+  ref  <- factor(ref,  levels = c("wet", "dry"))
+  caret::confusionMatrix(pred, ref, positive = positive)
+}
+
+cms <- c(
+  list(
+    postproc10  = get_cm(refac$postproc10, refac$true_label),
+    dswe_agg  = get_cm(refac$dswe_agg, refac$true_label),
+    dswe_cons = get_cm(refac$dswe_cons, refac$true_label),
+    dw        = get_cm(refac$dw, refac$true_label),
+    jrc       = get_cm(refac$jrc, refac$true_label)
+))
+
+roc_curve <- pROC::roc(refac$true_label, pixel_results$probabilities)
+auc_val <- round(as.numeric(pROC::auc(roc_curve)), 2)
+null_acc <- round(cms$model$overall["AccuracyNull"] * 100, 0)
+
+pixel_metrics <- imap_dfr(cms, function(cm, name) {
+  tibble(
+    source = name,
+    auc = if (name=="postproc10") auc_val else NA,
+    oa = paste0(round(cm$overall["Accuracy"], 2) * 100, "%"),
+    sensitivity = round(cm$byClass["Sensitivity"], 2),
+    specificity = round(cm$byClass["Specificity"], 2),
+    precision = round(cm$byClass["Precision"], 2),
+    oe = 1-sensitivity,
+    ce = 1-precision,
+    F1 = round((2*sensitivity*precision)/(sensitivity+precision),2)
+    ) |>
+    select(-c(sensitivity, specificity, precision))
+})
+pixel_metrics
+```
+
+Combine tables
+```{r}
+t5 <- inner_join(pixel_metrics, plot_metrics) |>
+  mutate(source = factor(source, levels=c("postproc10", "dswe_cons", "dswe_agg", "dw", "jrc"))) |>
+  arrange(source)
+t5
+```
+
+```{r}
+write_csv(t5, here("figures/R/Table_05.csv"))
+```

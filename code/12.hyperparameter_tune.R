@@ -8,29 +8,46 @@ library(parallelly)
 library(future)
 library(here)
 
+
+# Author: Maggie Church
+# Updated: 2026-02-21
+
+# Description: This script selects the hyperparameters used in the final model
+# 
+# Inputs: final training data (created in script #10)
+#
+# Steps: Run cross-validated hyperparameter tuning (CV-RFE) to get the top hyperparameters
+# 
+# I Tuned the 4 RF hyperparameters that are in GEE (I limited num.trees's tuning ceiling to 500, 
+# because any more would take forever to deploy the model)
+# 
+# Output: printed tuning results
+#
+# Note: I ran this in an HPC, saving the results of each cv-rfe run to csv (this 
+#       uses all nodes available, so be careful if running on a desktop)
+
 set.seed(123) 
 
 # read in training data
-train <- read_csv(here("data", "train_test_data", "balanced_training_b100.csv")) %>% 
-  filter(!is.na(NDRE))
+train <- read_csv(here("data/train_test_data/balanced_training/training_bal.csv"))
 
-# selected featureset (determined in 10.feature_selection.R)
-sel_featureset <- c("AWEISH", "swir2", "TCB", "NDRE", "VH", "IFW", "TCG")
+# selected featureset (determined in 11.feature_selection.R)
+sel_featureset <- c("swir1", "NDRE", "TCG", "WTI", "IFW", "VH", "BU3", "TVI")
 
 # set up task
 task <- 
-  train %>% 
-  select(all_of(sel_featureset), type, block) %>% 
-  mutate(type=as.factor(type)) %>%  
+  train |> 
+  select(all_of(sel_featureset), type, block) |> 
+  mutate(type=as.factor(type)) |>  
   as_task_classif(target="type", 
                   positive="wet")
 
-# instantiate leave-one-block-out resampling method
+# instantiate leave-one-block-out resampling for CV
 rsmp_lobo <- rsmp("loo")
 task$set_col_roles("block", add_to = "group")
 rsmp_lobo$instantiate(task)
 
-# limit task to our SELECTED predictors
+# limit task to our selected predictors
 task <- task$select(sel_featureset)
 
 # setup parallel processing

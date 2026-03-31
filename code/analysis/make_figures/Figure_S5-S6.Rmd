@@ -1,0 +1,210 @@
+---
+title: "Figures S5-S6"
+author: "Maggie Church"
+created: "2025-06-06"
+updated: "2026-03-09"
+---
+```{r}
+library(tidyverse)
+library(here)
+```
+
+```{r}
+source(here("code/analysis/make_figures/helper_functions/prep_pixel_results.R"))
+```
+
+```{r}
+facet_labels <- c(
+  "Northwestern Glaciated Plains (MT)"     = "Northwestern Glaciated \nPlains (MT)" ,
+  "Northwestern Glaciated Plains (ND/SD)"  = "Northwestern Glaciated \nPlains (Dakotas)",
+  "Lake Agassiz Plain (N. MN)"             = "Lake Agassiz Plain" ,
+  "North Central Hardwood Forests (C. MN)" = "North Central Hardwood \nForests",
+  "Northern Glaciated Plains (ND + SD)"    = "Northern Glaciated Plains" ,
+  "Western Corn Belt Plains (S. MN + IA)"  = "Western Corn Belt Plains"
+)
+
+# NDVI breaks
+ndvi_breaks <- seq(-1, 1, by = 0.1)
+ndvi_mids   <- seq(-0.95, 0.95, by = 0.1)
+```
+
+### Fig S5: Accuracy by region & NDVI
+```{r}
+binned_ndvi_ecoregion <- pixel_results |>
+  mutate(
+    ndvi_bin = cut(NDVI, breaks = ndvi_breaks, include.lowest = TRUE),
+    ndvi_mid = ndvi_mids[as.numeric(ndvi_bin)]
+  ) |>
+  filter(!is.na(postproc10)) |> 
+  group_by(ndvi_mid, ecoregion_name) |>
+  reframe(
+    TP = sum(true_label == "wet" & postproc10 == "water"),
+    FP = sum(true_label == "dry" & postproc10 == "water"),
+    FN = sum(true_label == "wet" & postproc10 == "nonwater"),
+    sensitivity = TP / (TP + FN),
+    OE = 1-sensitivity,
+    precision   = TP / (TP + FP),
+    CE = 1-precision
+  ) |> 
+  select(ndvi_mid, ecoregion_name, OE, CE, TP, FP, FN) |> 
+  pivot_longer(cols=c(OE, CE), names_to="metric") |>
+  filter(!(metric=="OE" & TP+FN < 20)) |> #drop low-obs rows
+  filter(!(metric=="CE" & TP+FP < 20)) |> 
+  select(-c(TP, FP, FN)) |>
+  arrange(ecoregion_name)
+  
+wet_df <- pixel_results |> filter(true_label == "wet") 
+
+scale_factor <- 0.00001
+
+# plot OE by NDVI - by ecoregion
+# 1200 x 500
+p_s5 <- binned_ndvi_ecoregion |>
+  ggplot(aes(x = ndvi_mid, y = value, color=metric)) +
+  geom_line(linewidth=1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_histogram(
+    data = wet_df,
+    aes(
+      x = NDVI,
+      y = ..count.. * scale_factor,
+      fill = "Distribution of water points by NDVI"
+    ),
+    bins = 20,
+    alpha = 0.3,
+    inherit.aes = FALSE
+  ) + 
+  facet_wrap(~ecoregion_name, labeller = as_labeller(facet_labels)) +
+  scale_fill_manual(
+    name = "",  
+    values = c("Distribution of water points by NDVI" = "grey50"),
+    labels = "Distribution of water\npixels by NDVI",
+    guide = guide_legend(order = 2)
+  ) +
+  scale_color_manual(
+    name = "Metric",
+    values = c("OE" = "#E69F00", "CE" = "skyblue2"),
+    guide = guide_legend(order = 1)
+  ) +
+  scale_y_continuous(name = "OE/CE") +
+  labs(
+    x = "NDVI",
+    title = "Model Error by NDVI and Ecoregion"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 18),
+    axis.text  = element_text(size = 18),
+    plot.title = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text  = element_text(size = 18),
+    strip.text = element_text(size = 14)
+  ) +
+ theme(panel.spacing.x = unit(1.5, "lines"))
+```
+
+### Fig S6: Accuracy by survey & NDVI
+```{r}
+binned_ndvi_dataset <- pixel_results |>
+  mutate(
+    ndvi_bin = cut(NDVI, breaks = ndvi_breaks, include.lowest = TRUE),
+    ndvi_mid = ndvi_mids[as.numeric(ndvi_bin)]
+  ) |>
+  filter(!is.na(postproc10)) |> 
+  group_by(ndvi_mid, dataset) |>
+  reframe(
+    TP = sum(true_label == "wet" & postproc10 == "water"),
+    FP = sum(true_label == "dry" & postproc10 == "water"),
+    FN = sum(true_label == "wet" & postproc10 == "nonwater"),
+    sensitivity = TP / (TP + FN),
+    OE = 1-sensitivity,
+    precision   = TP / (TP + FP),
+    CE = 1-precision
+  ) |> 
+  filter(TP+FP+FN > 10) |> 
+  arrange(dataset) |> 
+  mutate(dataset = case_when(
+    dataset=="brood16" ~ "Aug 2016",
+    dataset=="2022" ~ "May 2022",
+    dataset=="2024" ~ "May 2024"
+  )) |> 
+  select(ndvi_mid, dataset, OE, CE, TP, FP, FN) |> 
+  pivot_longer(cols=c(OE, CE), names_to="metric") |>
+  filter(!(metric=="OE" & TP+FN < 20)) |> #drop low-obs rows
+  filter(!(metric=="CE" & TP+FP < 20)) |> 
+  select(-c(TP, FP, FN))
+
+wet_df <- pixel_results |> 
+  filter(true_label == "wet") |> 
+  mutate(dataset = case_when(
+    dataset=="brood16" ~ "Aug 2016",
+    dataset=="2022" ~ "May 2022",
+    dataset=="2024" ~ "May 2024"
+  ))
+
+scale_factor <- 0.00001
+
+# plot OE by NDVI - by dataset
+# 1200 x 500
+p_s6 <- binned_ndvi_dataset |>
+  ggplot(aes(x = ndvi_mid, y = value, color=metric)) +
+  geom_line(linewidth=1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_histogram(
+    data = wet_df,
+    aes(
+      x = NDVI,
+      y = ..count.. * scale_factor,
+      fill = "Distribution of water points by NDVI"
+    ),
+    bins = 20,
+    alpha = 0.3,
+    inherit.aes = FALSE
+  ) + 
+  facet_wrap(~dataset) +
+  scale_fill_manual(
+    name = "",  
+    values = c("Distribution of water points by NDVI" = "grey50"),
+    labels = "Distribution of water\npixels by NDVI",
+    guide = guide_legend(order = 2)
+  ) +
+  scale_color_manual(
+    name = "Metric",
+    values = c("OE" = "#E69F00", "CE" = "skyblue2"),
+    guide = guide_legend(order = 1)
+  ) +
+  scale_y_continuous(name = "OE/CE") +
+  labs(
+    x = "NDVI",
+    title = "Model Error by NDVI and Survey Period"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 18),
+    axis.text  = element_text(size = 18),
+    plot.title = element_text(size = 20),
+    legend.title = element_text(size = 18),
+    legend.text  = element_text(size = 18),
+    strip.text = element_text(size = 14)
+  ) + theme(
+    panel.spacing.x = unit(1.5, "lines")
+  )
+```
+
+```{r}
+ggsave(filename = here("figures/Figure_S5.png"),
+       plot = p_s5,
+       width = 1400/96, 
+       height = 600/96, 
+       units = "in",
+       dpi = 1000)
+```
+
+```{r}
+ggsave(filename = here("figures/R/Figure_S6.png"),
+       plot = p_s6,
+       width = 1400/96, 
+       height = 300/96, 
+       units = "in",
+       dpi = 1000)
+```
