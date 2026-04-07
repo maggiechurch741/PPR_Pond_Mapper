@@ -1,10 +1,14 @@
 library(sf)
 library(tmap)
+library(dplyr)
 
-veg_est <- st_read("figs8/plot_May24_plot262_est.shp")
-veg_obs <- st_read("figs8/plot_May24_plot262_obs.shp")
-river_est <- st_read("figs8/plot_May24_plot937_est.shp")
-river_obs <- st_read("figs8/plot_May24_plot937_obs.shp")
+# Same with pond counts
+all_sf <- st_read(here("data/accuracy_assessment/all_est_obs_clouds"))
+
+veg_est <- all_sf |> filter(Plot==262 & dataset=="2024" & type=="estimated_ours")
+veg_obs <- all_sf |> filter(Plot==262 & dataset=="2024" & type=="observed")
+river_est <- all_sf |> filter(Plot==937 & dataset=="2024" & type=="estimated_ours")
+river_obs <- all_sf |> filter(Plot==937 & dataset=="2024" & type=="observed")
 
 # library(mapedit)
 # drawn_features <- editMap(mapview(veg_est))
